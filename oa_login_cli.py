@@ -182,6 +182,11 @@ def same_page(left: str, right: str) -> bool:
     )
 
 
+def is_process_sheet(operation: dict) -> bool:
+    url = urlparse(operation.get("url", ""))
+    return url.hostname == "noah.vgrass.com" and url.path.endswith("/plm/styleManage/newStyleManage.html")
+
+
 def captcha_visible(page: Any) -> bool:
     for frame in page.frames:
         try:
@@ -282,7 +287,7 @@ def install_noah_login_compatibility(context: Any) -> None:
         page_url = urlparse(request.frame.url)
         if (urlparse(request.url).hostname != "noah.vgrass.com"
                 or page_url.hostname != "noah.vgrass.com"
-                or page_url.path != "/activiti/html/login.html"):
+                or page_url.path not in {"/activiti/html/login.html", "/activiti/html/plm/styleManage/newStyleManage.html", "/activiti/html/plm/styleManage/printAll.html"}):
             route.continue_()
             return
         response = route.fetch()
@@ -450,6 +455,82 @@ class AutomationController:
             elif not form_seen and time.monotonic() - first_seen_at > 30:
                 raise RuntimeError("登录页加载超时：未找到可填写的用户名和密码输入框。")
 
+    def _print_process_sheets(self, context: Any, page: Any, operation: dict) -> dict:
+        style_code = operation["style_code"]
+        printed = []
+        seen = set()
+        page_number, row_index = 1, 0
+        while True:
+            self.check_cancelled()
+            self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…")
+            page.wait_for_function("() => window.jQuery && jQuery('#tb_user').data('bootstrap.table') && !jQuery.active", timeout=60_000)
+            page.locator('input[name="styleCode"].searchMatnr').fill(style_code)
+            # Wait for Bootstrap Table's render event, not merely an HTTP response.
+            page.evaluate("""() => { window.__aioaLoaded = false;
+              jQuery('#tb_user').one('load-success.bs.table', () => { window.__aioaLoaded = true; }); }""")
+            page.locator('button.btn_searchStyle').click()
+            page.wait_for_function("() => window.__aioaLoaded", timeout=60_000)
+            page.evaluate("""() => { window.__aioaLoaded = false;
+              jQuery('#tb_user').one('load-success.bs.table', () => { window.__aioaLoaded = true; }); }""")
+            options = page.evaluate("() => {const o=jQuery('#tb_user').bootstrapTable('getOptions');return {page:o.pageNumber,total:o.totalRows,size:o.pageSize}}")
+            if options["page"] != page_number:
+                page.evaluate("n => jQuery('#tb_user').bootstrapTable('selectPage', n)", page_number)
+                page.wait_for_function("() => window.__aioaLoaded", timeout=60_000)
+            rows = page.evaluate("() => jQuery('#tb_user').bootstrapTable('getData').map(r => ({id:r.bomTitleId,style:r.styleCode,seq:r.seqNo}))")
+            if not rows:
+                raise RuntimeError(f"款号 {style_code} 未查询到工艺单。")
+            if row_index >= len(rows):
+                if page_number * int(options["size"]) >= int(options["total"]):
+                    break
+                page_number += 1
+                row_index = 0
+                continue
+            row = rows[row_index]
+            if str(row["style"]).upper() != style_code:
+                row_index += 1
+                continue
+            key = str(row["id"])
+            if not row["id"] or key in seen:
+                raise RuntimeError("查询结果缺少唯一编号或发生变化，已停止以避免重复打印。")
+            self.check_cancelled()
+            self.update("reading", f"正在打开第 {len(printed)+1} 份工艺单（{style_code}，次数 {row['seq']}）…")
+            page.locator(f'#tb_user input[name="parentItem"][data-index="{row_index}"]').check()
+            page.locator('#processSheetPrint').click(timeout=15_000)
+            modal = page.locator('#printModel')
+            modal.wait_for(state="visible", timeout=15_000)
+            modal.locator('input.checkAll').check()
+            if not modal.locator('.eachCheckbox input[type="checkbox"]').count():
+                raise RuntimeError("打印弹窗中没有可用的打印项。")
+            unchecked = modal.locator('.eachCheckbox input[type="checkbox"]:not(:checked)').count()
+            if unchecked:
+                raise RuntimeError("OA 未完成全部打印项勾选，已停止。")
+            modal.locator('button.btn_tOPrint').click()
+            page.wait_for_url("**/printAll.html?**", wait_until="domcontentloaded", timeout=60_000)
+            seen.add(key)
+            printed.append(f"{style_code} / 次数 {row['seq']}：{page.url}")
+            row_index += 1
+            # Keep each native print page alive; use another tab for the next row.
+            page = context.new_page()
+            page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+            if self._on_login_page(page, operation):
+                raise RuntimeError(f"登录已失效；此前已打开 {len(printed)} 份工艺单。")
+        page.close()
+        if not printed:
+            raise RuntimeError(f"没有与款号 {style_code} 完全匹配的工艺单。")
+        result = {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
+        self.update("awaiting_print", f"已打开 {len(printed)} 份打印页面。请在 OA 浏览器中检查或打印，完成后点击“结束打印”。", **result)
+        while True:
+            self.check_cancelled()
+            try:
+                if self.messages.get_nowait()[0] == "finish_print":
+                    return result
+            except queue.Empty:
+                pass
+            remaining = [tab for tab in context.pages if not tab.is_closed()]
+            if not remaining:
+                return result
+            remaining[0].wait_for_timeout(250)
+
     def _run(self, operation: dict) -> None:
         context = None
         final_phase = "error"
@@ -486,6 +567,11 @@ class AutomationController:
 
                 if dismiss_initial_password_modal(page):
                     self.update("opening", "已关闭修改初始密码提示。")
+                if is_process_sheet(operation):
+                    result = self._print_process_sheets(context, page, operation)
+                    final_phase = "done"
+                    final_message = "工艺单打印流程已结束（实际打印结果请以浏览器或打印机为准）。"
+                    return
                 self.update("reading", "正在读取业务页面主要内容…")
                 result = {
                     "title": page.title(),
@@ -654,6 +740,12 @@ PAGE_HTML = r'''<!doctype html>
   themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;document.cookie='aioa-theme='+next+'; Path=/; Max-Age=31536000; SameSite=Strict';updateThemeButton()});
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   const $ = id => document.getElementById(id);
+  const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
+  printFields.innerHTML='<label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"><p class="panel-sub">逐行打开精确匹配款号的工艺单，包含全部打印项。</p>';
+  document.querySelector('.run-actions').before(printFields);
+  const finishPrint=document.createElement('button');finishPrint.id='finishPrint';finishPrint.className='primary';finishPrint.textContent='结束打印';finishPrint.hidden=true;document.querySelector('.run-actions').append(finishPrint);
+  finishPrint.onclick=async()=>{try{await api('/api/finish-print','POST',{});await refresh()}catch(error){toast(error.message)}};
+  function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.hostname==='noah.vgrass.com'&&u.pathname.endsWith('/plm/styleManage/newStyleManage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
   settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="button" class="ghost" id="testLogin">测试登录</button><button type="submit" class="primary">保存设置</button></div></form></div>';
@@ -665,8 +757,8 @@ PAGE_HTML = r'''<!doctype html>
   $('settingsForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});$('closeSettings').click();await refresh();toast('系统设置已保存')}catch(error){toast(error.message)}};
   $('testLogin').onclick=async()=>{try{if(!$('settingsForm').reportValidity())return;await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});await api('/api/test-login','POST',{});$('closeSettings').click();await refresh()}catch(error){toast(error.message)}};
   let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false;
-  const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
-  const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
+  const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping','awaiting_print']);
+  const labels = {awaiting_print:'等待打印完成',idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
   function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('show'),3600)}
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
@@ -678,12 +770,13 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
-    const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent='打开业务页面 · 验证登录 · 读取内容';$('composerCopy').append(hint);
+    $('printFields').hidden=!isPrintOperation(selected());$('finishPrint').hidden=currentTask.phase!=='awaiting_print';$('styleCode').disabled=runningPhases.has(currentTask.phase);
+    const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=isPrintOperation(chosen)?'验证登录 · 查询款号 · 逐行打开全部打印项':'打开业务页面 · 验证登录 · 读取内容';$('composerCopy').append(hint);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
     $('runButton').disabled=!selected()||active;$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     let step=phase==='idle'?1:phase==='opening'?1:['login_required','authenticating'].includes(phase)?2:3;for(let i=1;i<=3;i++){const node=$('step'+i);node.className='step'+(i<step?' complete':i===step?' active':'')}
-    const hasResult=phase==='done'&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
+    const hasResult=['done','awaiting_print'].includes(phase)&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
   async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
   function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
@@ -691,7 +784,7 @@ PAGE_HTML = r'''<!doctype html>
   $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
   $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
   $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
-  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;try{await api('/api/run','POST',{name:item.name});await refresh()}catch(error){toast(error.message)}});
+  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!style_code){toast('请输入工艺单款号');$('styleCode').focus();return}try{await api('/api/run','POST',{name:item.name,style_code});await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   refresh();setInterval(refresh,1300);
@@ -808,7 +901,17 @@ class LocalHandler(BaseHTTPRequestHandler):
                     operation = next((dict(item, login_url=settings["login_url"]) for item in business_operations(settings) if item["name"] == name), None)
                 if operation is None:
                     raise ValueError("业务操作不存在，请刷新页面。")
+                if is_process_sheet(operation):
+                    style_code = str(body.get("style_code", "")).strip().upper()
+                    if not re.fullmatch(r"[A-Z0-9_-]{1,80}", style_code):
+                        raise ValueError("请输入有效款号（字母、数字、横线或下划线，最多 80 位）。")
+                    operation["style_code"] = style_code
                 CONTROLLER.start(operation)
+                self._send(200, {"ok": True})
+            elif self.path == "/api/finish-print":
+                if CONTROLLER.snapshot()["phase"] != "awaiting_print":
+                    raise ValueError("当前没有待结束的打印任务。")
+                CONTROLLER.messages.put(("finish_print",))
                 self._send(200, {"ok": True})
             elif self.path == "/api/credentials":
                 CONTROLLER.submit_credentials(str(body.get("username", "")), str(body.get("password", "")))
