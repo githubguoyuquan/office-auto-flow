@@ -247,6 +247,33 @@ def launch_context(playwright: Any) -> Any:
         )
 
 
+LOGIN_SUBMIT_GUARD = r"""
+(() => {
+  function guard(event) {
+    if (location.hostname !== 'noah.vgrass.com' ||
+        !location.pathname.endsWith('/activiti/html/login.html')) return;
+    const form = document.querySelector('form#loginForm');
+    const button = form && form.querySelector('.btn_submit');
+    if (!form || !button) return;
+    const submit = event.type === 'submit' && event.target === form;
+    const click = event.type === 'click' && button.contains(event.target);
+    if (!submit && !click) return;
+    const ready = window.jQuery && window.SYS && SYS.login &&
+      jQuery._data(button, 'events')?.click?.length;
+    // NOAH authenticates using its click handler, never a native form submit.
+    if (submit || !ready) event.preventDefault();
+    if (!ready) {
+      event.stopImmediatePropagation();
+      const message = form.querySelector('.my_message');
+      if (message) message.textContent = '登录脚本尚未就绪，请稍候再点击登录；若持续出现，请检查网络或联系管理员。';
+    }
+  }
+  document.addEventListener('click', guard, true);
+  document.addEventListener('submit', guard, true);
+})();
+"""
+
+
 class Cancelled(Exception):
     pass
 
@@ -403,6 +430,7 @@ class AutomationController:
 
             with sync_playwright() as playwright:
                 context = launch_context(playwright)
+                context.add_init_script(LOGIN_SUBMIT_GUARD)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
                 page.wait_for_timeout(1_800)
