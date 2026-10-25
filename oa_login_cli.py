@@ -408,12 +408,11 @@ class AutomationController:
                 page.wait_for_timeout(1_800)
                 self.check_cancelled()
 
-                if not self._on_login_page(page, operation) and not same_page(page.url, operation["url"]) and operation.get("login_url"):
-                    page.goto(operation["login_url"], wait_until="domcontentloaded", timeout=60_000)
-
-                login_was_target = False
+                # A login page may redirect immediately when a session already exists.
+                # Preserve that landing page instead of navigating back to login.
+                login_was_target = bool(operation.get("test_login"))
                 if self._on_login_page(page, operation):
-                    login_was_target = same_page(page.url, operation["url"])
+                    login_was_target = login_was_target or same_page(page.url, operation["url"])
                     self._wait_for_login(page, operation)
                     if not login_was_target and not same_page(page.url, operation["url"]):
                         self.update("opening", "登录完成，正在打开目标业务页面…")
@@ -718,7 +717,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     settings = load_settings()
                 if not settings["login_url"]:
                     raise ValueError("请先保存登录页面地址。")
-                CONTROLLER.start({"name": "测试登录", "url": settings["login_url"], **settings})
+                CONTROLLER.start({"name": "测试登录", "url": settings["login_url"], "test_login": True, **settings})
                 self._send(200, {"ok": True})
             elif self.path == "/api/operations":
                 name = str(body.get("name", "")).strip()
