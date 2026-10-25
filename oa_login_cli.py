@@ -393,16 +393,19 @@ class AutomationController:
                 if not self._on_login_page(page, operation) and not same_page(page.url, operation["url"]) and operation.get("login_url"):
                     page.goto(operation["login_url"], wait_until="domcontentloaded", timeout=60_000)
 
+                login_was_target = False
                 if self._on_login_page(page, operation):
+                    login_was_target = same_page(page.url, operation["url"])
                     self._wait_for_login(page, operation)
-                    self.update("opening", "登录完成，正在返回业务页面…")
-                    page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
-                    page.wait_for_timeout(1_200)
+                    if not login_was_target and not same_page(page.url, operation["url"]):
+                        self.update("opening", "登录完成，正在打开目标业务页面…")
+                        page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                        page.wait_for_timeout(1_200)
                     self.check_cancelled()
                     if self._on_login_page(page, operation):
                         raise RuntimeError("返回业务页面后仍显示登录表单，请检查账号或登录状态。")
 
-                if not same_page(page.url, operation["url"]):
+                if not login_was_target and not same_page(page.url, operation["url"]):
                     raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
 
                 if dismiss_initial_password_modal(page):
