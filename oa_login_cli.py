@@ -274,6 +274,36 @@ LOGIN_SUBMIT_GUARD = r"""
 """
 
 
+def install_noah_login_compatibility(context: Any) -> None:
+    # NOAH's legacy shims omit dependencies used during module initialization.
+    # Patch only the login page's loader response, leaving server files intact.
+    def patch_loader(route: Any) -> None:
+        request = route.request
+        page_url = urlparse(request.frame.url)
+        if (urlparse(request.url).hostname != "noah.vgrass.com"
+                or page_url.hostname != "noah.vgrass.com"
+                or page_url.path != "/activiti/html/login.html"):
+            route.continue_()
+            return
+        response = route.fetch()
+        source = response.text()
+        marker = "require(['oo', 'doT',"
+        dependencies = """
+require.config({shim: {
+  'common': {deps: ['oo', 'jquery.lazyload', 'bootstrap', 'jquery.cookie', 'jquery.properties']},
+  'translate': {deps: ['jquery', 'jquery.properties', 'jquery.cookie']},
+  'translator': {deps: ['jquery', 'oo']},
+  'noah': {deps: ['oo', 'jquery', 'base64', 'dialog', 'common']},
+  'sys-tool': {deps: ['oo', 'base64', 'zi_pagination', 'jqueryUi', 'common']}
+}});
+"""
+        if marker in source:
+            source = source.replace(marker, dependencies + marker, 1)
+        route.fulfill(response=response, body=source)
+
+    context.route("**/activiti/js/main.js*", patch_loader)
+
+
 class Cancelled(Exception):
     pass
 
@@ -431,6 +461,7 @@ class AutomationController:
             with sync_playwright() as playwright:
                 context = launch_context(playwright)
                 context.add_init_script(LOGIN_SUBMIT_GUARD)
+                install_noah_login_compatibility(context)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
                 page.wait_for_timeout(1_800)
