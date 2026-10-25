@@ -482,7 +482,32 @@ PAGE_HTML = r'''<!doctype html>
     .modal{border-radius:20px;padding:28px;box-shadow:0 24px 80px #0002}.modal-backdrop{background:#0005}.modal p{color:#888}.modal h3{font-weight:600}.icon-btn{background:#f4f4f4;color:#666}.toast{background:#292929}.sidebar-toggle{display:none;background:transparent;border:0;font-size:19px;color:#666;padding:8px;margin-right:10px}
     @media(max-width:1060px){.shell{grid-template-columns:238px minmax(0,1fr)}.sidebar{padding:20px 12px}.brand{justify-content:flex-start;padding:3px 12px 24px}.brand-copy,.side-bottom{display:block}.content{padding:35px 25px}.topbar{padding:0 22px}}
     @media(max-width:760px){.shell{display:block}.sidebar{position:fixed;left:0;top:0;width:260px;height:100dvh;z-index:15;display:flex;flex-direction:column;transform:translateX(-100%);transition:transform .18s;box-shadow:10px 0 35px #0001}.sidebar.sidebar-open{transform:translateX(0)}.sidebar-toggle{display:inline-block}.topbar{height:60px;padding:0 14px}.top-pill{display:none}.content{padding:24px 20px;min-height:calc(100dvh - 60px)}.page-title{font-size:25px;margin-top:5vh}.page-desc{font-size:12px;margin-bottom:35px}.run-body{padding:0}.run-head{padding:0 0 20px}.run-actions{bottom:10px;margin-top:30px}.login-grid{grid-template-columns:1fr}.brand{padding:3px 12px 24px}.brand-copy{display:block}}
+    .theme-toggle{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:999px;padding:8px 13px;font-size:12px;white-space:nowrap}.theme-toggle:hover{background:var(--pale)}
+    html[data-theme="dark"]{color-scheme:dark;--ink:#ececec;--muted:#aaa;--line:#424242;--blue:#ececec;--blue-2:#fff;--pale:#353535;--canvas:#212121}
+    html[data-theme="dark"] body,html[data-theme="dark"] .topbar{background:#212121;color:#ececec}
+    html[data-theme="dark"] .sidebar{background:#171717;border-color:#303030;color:#ddd}
+    html[data-theme="dark"] .brand,html[data-theme="dark"] .crumb b,html[data-theme="dark"] .op-name,html[data-theme="dark"] .selected-name,html[data-theme="dark"] .result-title,html[data-theme="dark"] .empty h4{color:#ececec}
+    html[data-theme="dark"] .brand-mark{background:#3e3e3e}
+    html[data-theme="dark"] #addButton{color:#ddd;border-color:#393939;background:transparent}
+    html[data-theme="dark"] #addButton:hover,html[data-theme="dark"] .operation:hover,html[data-theme="dark"] .operation.selected{background:#303030}
+    html[data-theme="dark"] .search,html[data-theme="dark"] .top-pill,html[data-theme="dark"] .avatar,html[data-theme="dark"] .status-icon,html[data-theme="dark"] .empty-icon,html[data-theme="dark"] .icon-btn{background:#303030;color:#bbb}
+    html[data-theme="dark"] .side-bottom,html[data-theme="dark"] .detail,html[data-theme="dark"] .result{border-color:#373737}
+    html[data-theme="dark"] .status-message,html[data-theme="dark"] .local-row,html[data-theme="dark"] .field-label,html[data-theme="dark"] .composer-copy{color:#bbb}
+    html[data-theme="dark"] .status-badge,html[data-theme="dark"] .status-badge.running{background:#353535;color:#ccc}
+    html[data-theme="dark"] .status-badge.done{background:#203e33;color:#8cdbb9}html[data-theme="dark"] .status-badge.error{background:#482b30;color:#ffa3ae}html[data-theme="dark"] .status-badge.login_required{background:#493d26;color:#edcb84}
+    html[data-theme="dark"] .step.active{color:#eee}html[data-theme="dark"] .step.active .step-num{background:#ddd;border-color:#ddd;color:#222}html[data-theme="dark"] .step-num{border-color:#555}html[data-theme="dark"] .step-line{background:#424242}
+    html[data-theme="dark"] .login-card,html[data-theme="dark"] .result pre{background:#272727;border-color:#424242;color:#ddd}
+    html[data-theme="dark"] .field{background:#212121;border-color:#505050;color:#eee}html[data-theme="dark"] .field:focus,html[data-theme="dark"] .search:focus{border-color:#999;box-shadow:0 0 0 3px #ffffff12}
+    html[data-theme="dark"] .run-actions{background:#303030;border-color:#424242;box-shadow:none}
+    html[data-theme="dark"] .primary{background:#ececec;color:#222}html[data-theme="dark"] .primary:hover:not(:disabled){background:#fff}
+    html[data-theme="dark"] .ghost{background:transparent;color:#ddd;border-color:#555}html[data-theme="dark"] .ghost:hover:not(:disabled){background:#3a3a3a}
+    html[data-theme="dark"] .modal{background:#292929;color:#eee}html[data-theme="dark"] .modal-backdrop{background:#0009}html[data-theme="dark"] .toast{background:#eee;color:#222}
+    :focus-visible{outline:2px solid #888;outline-offset:3px}
   </style>
+  <script>
+    // Read preference before painting; this browser's choice survives server port changes.
+    try{const saved=document.cookie.split('; ').find(item=>item.startsWith('aioa-theme='))?.split('=')[1];document.documentElement.dataset.theme=saved==='dark'||saved==='light'?saved:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch{document.documentElement.dataset.theme='light'}
+  </script>
 </head>
 <body>
 <div class="shell">
@@ -545,6 +570,10 @@ PAGE_HTML = r'''<!doctype html>
   const composerCopy=document.createElement('div');composerCopy.className='composer-copy';composerCopy.id='composerCopy';
   document.querySelector('.run-actions').prepend(composerCopy);
   const TOKEN = '__AIOA_TOKEN__';
+  const themeButton=document.createElement('button');themeButton.type='button';themeButton.className='theme-toggle';
+  function updateThemeButton(){const dark=document.documentElement.dataset.theme==='dark';themeButton.textContent=dark?'☀ 浅色':'☾ 深色';themeButton.setAttribute('aria-label',dark?'切换到浅色模式':'切换到深色模式')}
+  themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;document.cookie='aioa-theme='+next+'; Path=/; Max-Age=31536000; SameSite=Strict';updateThemeButton()});
+  document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   const $ = id => document.getElementById(id);
   let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false;
   const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
