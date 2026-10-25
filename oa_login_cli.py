@@ -74,6 +74,24 @@ def normalize_url(value: str) -> str:
     return value
 
 
+def load_settings() -> dict:
+    path = data_dir() / "settings.json"
+    if path.exists():
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return {"login_url": value.get("login_url", "")}
+    operations = load_operations()
+    login_url = next((item["login_url"] for item in operations if item.get("login_url")), "")
+    if not login_url:
+        login_url = next((item["url"] for item in operations if urlparse(item["url"]).path.lower().endswith("/login.html")), "")
+    return {"login_url": login_url}
+
+
+def business_operations(settings: dict) -> List[dict]:
+    return [{"name": item["name"], "url": item["url"]} for item in load_operations()
+            if not urlparse(item["url"]).path.lower().endswith("/login.html")
+            and not (settings["login_url"] and same_page(item["url"], settings["login_url"]))]
+
+
 def visible_locator(
     frame: Any, selectors: List[str], require_editable: bool = False
 ):
@@ -555,7 +573,7 @@ PAGE_HTML = r'''<!doctype html>
     </main>
   </div>
 </div>
-<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写业务页面地址；如登录页有固定地址，也可一并保存。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><label class="field-label" for="operationLoginUrl">登录页面 URL（可选）</label><input class="field" id="operationLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
+<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写业务名称和页面地址，登录地址统一在系统设置中配置。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
 <div class="toast" id="toast" role="status"></div>
 <script>
   const businessPanel = document.querySelector('[aria-label="业务操作"]');
@@ -578,6 +596,16 @@ PAGE_HTML = r'''<!doctype html>
   themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;document.cookie='aioa-theme='+next+'; Path=/; Max-Age=31536000; SameSite=Strict';updateThemeButton()});
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   const $ = id => document.getElementById(id);
+  const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
+  const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
+  settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="button" class="ghost" id="testLogin">测试登录</button><button type="submit" class="primary">保存设置</button></div></form></div>';
+  document.body.append(settingsModal);
+  settingsButton.onclick=async()=>{try{const data=await api('/api/state');$('systemLoginUrl').value=data.settings.login_url||'';settingsModal.classList.add('open');$('systemLoginUrl').focus()}catch(error){toast(error.message)}};
+  $('closeSettings').onclick=()=>{settingsModal.classList.remove('open');settingsButton.focus()};
+  settingsModal.addEventListener('click',event=>{if(event.target===settingsModal)$('closeSettings').click()});
+  document.addEventListener('keydown',event=>{if(event.key==='Escape'&&settingsModal.classList.contains('open'))$('closeSettings').click()});
+  $('settingsForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});$('closeSettings').click();await refresh();toast('系统设置已保存')}catch(error){toast(error.message)}};
+  $('testLogin').onclick=async()=>{try{if(!$('settingsForm').reportValidity())return;await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});await api('/api/test-login','POST',{});$('closeSettings').click();await refresh()}catch(error){toast(error.message)}};
   let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false;
   const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
   const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
@@ -600,10 +628,10 @@ PAGE_HTML = r'''<!doctype html>
     const hasResult=phase==='done'&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
   async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
-  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('operationLoginUrl').value=item?(item.login_url||''):'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
+  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
   function closeModal(){$('modalBackdrop').classList.remove('open');editingName=''}
   $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
-  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim(),login_url=$('operationLoginUrl').value.trim();try{await api('/api/operations','POST',{name,url,login_url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
+  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
   $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;try{await api('/api/run','POST',{name:item.name});await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
@@ -664,8 +692,9 @@ class LocalHandler(BaseHTTPRequestHandler):
             self._send(200, PAGE_HTML.replace("__AIOA_TOKEN__", ACCESS_TOKEN), "text/html")
         elif self.path == "/api/state" and self._authorized():
             with CONFIG_LOCK:
-                operations = load_operations()
-            self._send(200, {"operations": operations, "task": CONTROLLER.snapshot()})
+                settings = load_settings()
+                operations = business_operations(settings)
+            self._send(200, {"operations": operations, "settings": settings, "task": CONTROLLER.snapshot()})
         else:
             self._send(404, {"error": "页面不存在。"})
 
@@ -675,17 +704,33 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
-            if self.path == "/api/operations":
+            if self.path == "/api/settings":
+                value = str(body.get("login_url", "")).strip()
+                settings = {"login_url": normalize_url(value) if value else ""}
+                with CONFIG_LOCK:
+                    target = data_dir() / "settings.json"
+                    temporary = target.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+                    os.replace(temporary, target)
+                self._send(200, {"ok": True})
+            elif self.path == "/api/test-login":
+                with CONFIG_LOCK:
+                    settings = load_settings()
+                if not settings["login_url"]:
+                    raise ValueError("请先保存登录页面地址。")
+                CONTROLLER.start({"name": "测试登录", "url": settings["login_url"], **settings})
+                self._send(200, {"ok": True})
+            elif self.path == "/api/operations":
                 name = str(body.get("name", "")).strip()
                 old_name = str(body.get("old_name", "")).strip()
                 if not name or len(name) > 60:
                     raise ValueError("业务名称须为 1–60 个字符。")
                 url = normalize_url(str(body.get("url", "")))
-                login_url = str(body.get("login_url", "")).strip()
                 operation = {"name": name, "url": url}
-                if login_url:
-                    operation["login_url"] = normalize_url(login_url)
                 with CONFIG_LOCK:
+                    settings = load_settings()
+                    if urlparse(url).path.lower().endswith("/login.html") or (settings["login_url"] and same_page(url, settings["login_url"])):
+                        raise ValueError("登录地址请在系统设置中配置，无需添加为业务。")
                     existing = load_operations()
                     if old_name and not any(item["name"] == old_name for item in existing):
                         raise ValueError("原业务操作不存在，请刷新页面。")
@@ -701,7 +746,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/run":
                 name = str(body.get("name", ""))
                 with CONFIG_LOCK:
-                    operation = next((item for item in load_operations() if item["name"] == name), None)
+                    settings = load_settings()
+                    operation = next((dict(item, login_url=settings["login_url"]) for item in business_operations(settings) if item["name"] == name), None)
                 if operation is None:
                     raise ValueError("业务操作不存在，请刷新页面。")
                 CONTROLLER.start(operation)
