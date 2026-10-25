@@ -94,6 +94,7 @@ def visible_locator(
 
 def find_login_form(page: Any):
     username_selectors = [
+        'input#username',
         'input[autocomplete="username"]',
         'input[type="email"]',
         'input[placeholder*="用户名"]',
@@ -108,6 +109,7 @@ def find_login_form(page: Any):
         'input[type="text"]',
     ]
     password_selectors = [
+        'input#password',
         'input[autocomplete="current-password"]',
         'input[type="password"]',
     ]
@@ -140,6 +142,7 @@ def fill_login_form(page: Any, username: str, password: str):
 
 def click_login(frame: Any, password_locator: Any) -> None:
     submit_selectors = [
+        'button.btn_submit[data-i18n="common_login"]',
         'button[type="submit"]',
         'input[type="submit"]',
         'button:has-text("登录")',
@@ -152,6 +155,47 @@ def click_login(frame: Any, password_locator: Any) -> None:
         button.click()
     else:
         password_locator.press("Enter")
+
+
+def same_page(left: str, right: str) -> bool:
+    first, second = urlparse(left), urlparse(right)
+    return (first.scheme, first.netloc, first.path) == (
+        second.scheme, second.netloc, second.path
+    )
+
+
+def captcha_visible(page: Any) -> bool:
+    for frame in page.frames:
+        try:
+            image = frame.locator("img.kaptcha_img").first
+            if image.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def login_error_text(page: Any) -> str:
+    for frame in page.frames:
+        try:
+            label = frame.locator("label.my_message").first
+            if label.is_visible():
+                return label.inner_text(timeout=1_000).strip()
+        except Exception:
+            continue
+    return ""
+
+
+def dismiss_initial_password_modal(page: Any) -> bool:
+    button = page.locator(
+        '.modal-dialog button[data-dismiss="modal"][data-i18n="common_calcel"]'
+    ).first
+    try:
+        button.wait_for(state="visible", timeout=4_000)
+        button.click(timeout=4_000)
+        return True
+    except Exception:
+        return False
 
 
 def main_page_text(page: Any) -> str:
@@ -267,14 +311,27 @@ class AutomationController:
         except Exception:
             return False
 
-    def _wait_for_login(self, page: Any) -> None:
+    def _on_login_page(self, page: Any, operation: dict) -> bool:
+        if self._login_form_visible(page):
+            return True
+        login_url = operation.get("login_url")
+        if login_url and same_page(page.url, login_url):
+            return True
+        return urlparse(page.url).path.lower().endswith("/login.html")
+
+    def _wait_for_login(self, page: Any, operation: dict) -> None:
         submitted_at = None
+        first_seen_at = time.monotonic()
+        form_seen = False
+        last_login_error = ""
         self.update(
             "login_required",
-            "检测到登录页面。可在此输入账号密码，也可直接在已打开的 OA 浏览器中登录。",
+            "检测到登录页面。可在此填写账号密码；验证码请在已打开的 OA 浏览器中手工完成。",
         )
         while True:
             self.check_cancelled()
+            if self._login_form_visible(page):
+                form_seen = True
             try:
                 message = self.messages.get(timeout=1)
             except queue.Empty:
@@ -282,30 +339,41 @@ class AutomationController:
 
             if message and message[0] == "credentials":
                 _, username, password = message
+                last_login_error = ""
                 try:
                     frame, password_input = fill_login_form(page, username, password)
-                    click_login(frame, password_input)
-                    self.update(
-                        "authenticating",
-                        "已提交登录信息；如需验证码或二次验证，请在 OA 浏览器中完成。",
-                    )
-                    submitted_at = time.monotonic()
+                    if captcha_visible(page):
+                        self.update(
+                            "login_required",
+                            "账号密码已填入 OA 页面。请在 OA 浏览器中输入验证码并点击“登录”。",
+                        )
+                    else:
+                        click_login(frame, password_input)
+                        self.update("authenticating", "已提交登录信息，正在等待页面跳转…")
+                        submitted_at = time.monotonic()
                 except Exception as error:
                     self.update("login_required", f"自动填写失败：{error}。可在 OA 浏览器中手动登录。")
                 finally:
                     password = ""
 
             self.check_cancelled()
-            if not self._login_form_visible(page):
+            error_text = login_error_text(page)
+            if error_text and error_text != last_login_error:
+                self.update("login_required", f"登录页提示：{error_text}")
+                last_login_error = error_text
+
+            if form_seen and not self._on_login_page(page, operation):
                 page.wait_for_timeout(1100)
-                if not self._login_form_visible(page):
+                if not self._on_login_page(page, operation):
                     return
             elif submitted_at and time.monotonic() - submitted_at > 10:
                 self.update(
                     "login_required",
-                    "登录表单仍在页面上。请检查账号密码，或在 OA 浏览器中完成验证码和二次验证。",
+                    "登录页仍未跳转。请检查页面提示，或在 OA 浏览器中继续操作。",
                 )
                 submitted_at = None
+            elif not form_seen and time.monotonic() - first_seen_at > 30:
+                raise RuntimeError("登录页加载超时：未找到可填写的用户名和密码输入框。")
 
     def _run(self, operation: dict) -> None:
         context = None
@@ -319,18 +387,26 @@ class AutomationController:
                 context = launch_context(playwright)
                 page = context.pages[0] if context.pages else context.new_page()
                 page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
-                page.wait_for_timeout(900)
+                page.wait_for_timeout(1_800)
                 self.check_cancelled()
 
-                if self._login_form_visible(page):
-                    self._wait_for_login(page)
+                if not self._on_login_page(page, operation) and not same_page(page.url, operation["url"]) and operation.get("login_url"):
+                    page.goto(operation["login_url"], wait_until="domcontentloaded", timeout=60_000)
+
+                if self._on_login_page(page, operation):
+                    self._wait_for_login(page, operation)
                     self.update("opening", "登录完成，正在返回业务页面…")
                     page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
-                    page.wait_for_timeout(900)
+                    page.wait_for_timeout(1_200)
                     self.check_cancelled()
-                    if self._login_form_visible(page):
+                    if self._on_login_page(page, operation):
                         raise RuntimeError("返回业务页面后仍显示登录表单，请检查账号或登录状态。")
 
+                if not same_page(page.url, operation["url"]):
+                    raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
+
+                if dismiss_initial_password_modal(page):
+                    self.update("opening", "已关闭修改初始密码提示。")
                 self.update("reading", "正在读取业务页面主要内容…")
                 result = {
                     "title": page.title(),
@@ -380,6 +456,7 @@ PAGE_HTML = r'''<!doctype html>
     .result{margin-top:22px;border-top:1px solid var(--line);padding-top:20px}.result-top{display:flex;justify-content:space-between;align-items:center}.result h4{font-size:12px;margin:0}.result-meta{color:#9aa8ba;font-size:10px}.result-title{font-size:13px;font-weight:720;margin:13px 0 5px}.result-url{font-size:10px;color:#7d8ca3;word-break:break-all;margin:0 0 12px}.result pre{white-space:pre-wrap;word-break:break-word;background:#f7f9fd;border:1px solid #e8edf5;border-radius:9px;padding:15px;font:11px/1.7 "Cascadia Code","Consolas",monospace;color:#344766;margin:0;max-height:330px;overflow:auto}
     .guide{margin-top:24px;padding:16px 18px;border:1px solid #e7ecf3;border-radius:11px;background:#fbfcff;display:flex;gap:11px;align-items:start;color:#5d7090}.guide svg{width:17px;height:17px;flex:none;margin-top:1px;color:#7191ca}.guide strong{display:block;font-size:11px;color:#435773;margin-bottom:4px}.guide p{font-size:10px;line-height:1.7;margin:0}
     .modal-backdrop{position:fixed;inset:0;background:rgba(12,25,51,.48);z-index:20;display:none;align-items:center;justify-content:center;padding:20px}.modal-backdrop.open{display:flex}.modal{width:min(100%,440px);background:#fff;border-radius:16px;box-shadow:0 28px 70px rgba(13,31,69,.22);padding:26px}.modal-top{display:flex;justify-content:space-between;align-items:center}.modal h3{margin:0;font-size:18px;letter-spacing:-.025em}.modal p{color:#7e8da3;font-size:11px;line-height:1.7;margin:8px 0 22px}.modal .field-label{margin-top:15px}.modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:24px}.toast{position:fixed;right:25px;bottom:24px;background:#172b4d;color:#fff;padding:12px 17px;border-radius:10px;box-shadow:0 15px 40px rgba(13,31,69,.2);font-size:11px;z-index:30;opacity:0;transform:translateY(8px);pointer-events:none;transition:.2s}.toast.show{opacity:1;transform:translateY(0)}
+    .modal{max-height:calc(100vh - 40px);overflow:auto}
     @media(max-width:1060px){.shell{grid-template-columns:72px minmax(0,1fr)}.sidebar{padding:30px 11px}.brand{justify-content:center;padding:0 0 35px}.brand-copy,.nav-label,.nav-item span,.side-bottom{display:none}.nav-item{justify-content:center;padding:13px}.nav-item svg{width:20px;height:20px}}
     @media(max-width:800px){.workspace{grid-template-columns:1fr}.overview{grid-template-columns:repeat(3,minmax(0,1fr))}.content{padding:26px 20px 45px}.topbar{padding:0 20px}.hero{min-height:150px}}
     @media(max-width:560px){.shell{display:block}.sidebar{height:58px;position:static;flex-direction:row;align-items:center;padding:0 17px}.brand{padding:0}.brand-copy{display:block}.brand-sub{display:none}.nav-label,.nav-item,.side-bottom{display:none}.topbar{height:55px}.content{padding:24px 15px 40px}.page-title{font-size:25px}.hero{padding:24px}.hero h2{font-size:20px}.overview{gap:8px}.metric{padding:12px;gap:7px}.metric-icon{display:none}.metric-value{font-size:12px}.panel-heading,.run-body,.detail{padding-left:17px;padding-right:17px}.search-wrap{padding-left:17px;padding-right:17px}.search-wrap svg{left:30px}.login-grid{grid-template-columns:1fr}.top-pill{display:none}}
@@ -417,7 +494,7 @@ PAGE_HTML = r'''<!doctype html>
           <div class="run-body">
             <div class="timeline"><div class="step active" id="step1"><span class="step-num">1</span><span class="step-label">选择业务</span></div><div class="step-line"></div><div class="step" id="step2"><span class="step-num">2</span><span class="step-label">验证登录</span></div><div class="step-line"></div><div class="step" id="step3"><span class="step-num">3</span><span class="step-label">读取页面</span></div></div>
             <div class="status-card"><div class="status-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg></div><div><div class="status-title" id="statusTitle">准备就绪</div><div class="status-message" id="statusMessage">选择左侧业务操作后，即可开始。</div></div></div>
-            <div class="login-card" id="loginCard" hidden><h4>完成 OA 登录</h4><p>可在这里填写账号密码；如果 OA 要求验证码、扫码或二次验证，请在自动打开的浏览器中完成。</p><form id="loginForm"><div class="login-grid"><div><label class="field-label" for="username">用户名</label><input class="field" id="username" autocomplete="username" required></div><div><label class="field-label" for="password">密码</label><input class="field" id="password" type="password" autocomplete="current-password" required></div></div><button class="primary login-submit" type="submit" id="loginButton">提交登录信息</button></form></div>
+            <div class="login-card" id="loginCard" hidden><h4>完成 OA 登录</h4><p>在这里填写账号密码后，工具会将其填入 OA 页面。验证码请在 OA 浏览器中输入，再点击页面上的“登录”。</p><form id="loginForm"><div class="login-grid"><div><label class="field-label" for="username">用户名</label><input class="field" id="username" autocomplete="username" required></div><div><label class="field-label" for="password">密码</label><input class="field" id="password" type="password" autocomplete="current-password" required></div></div><button class="primary login-submit" type="submit" id="loginButton">填入 OA 页面</button></form></div>
             <div class="run-actions"><button class="primary" id="runButton" disabled>开始运行</button><button class="ghost" id="stopButton" hidden>停止任务</button></div>
             <p class="fine-print">密码仅用于本次登录，不写入业务配置。浏览器会在读取页面后自动关闭。</p>
             <div class="result" id="result" hidden><div class="result-top"><h4>页面主要内容</h4><span class="result-meta" id="resultTime"></span></div><div class="result-title" id="resultTitle"></div><p class="result-url" id="resultUrl"></p><pre id="resultContent"></pre></div>
@@ -428,7 +505,7 @@ PAGE_HTML = r'''<!doctype html>
     </main>
   </div>
 </div>
-<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写此业务的名称和页面地址，之后可直接选择使用。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
+<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写业务页面地址；如登录页有固定地址，也可一并保存。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><label class="field-label" for="operationLoginUrl">登录页面 URL（可选）</label><input class="field" id="operationLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
 <div class="toast" id="toast" role="status"></div>
 <script>
   const TOKEN = '__AIOA_TOKEN__';
@@ -440,12 +517,12 @@ PAGE_HTML = r'''<!doctype html>
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function renderOperations(){
-    const list=$('operationList');list.replaceChildren();const query=$('searchInput').value.trim().toLocaleLowerCase();const filtered=operations.filter(item=>(item.name+' '+item.url).toLocaleLowerCase().includes(query));
+    const list=$('operationList');list.replaceChildren();const query=$('searchInput').value.trim().toLocaleLowerCase();const filtered=operations.filter(item=>(item.name+' '+item.url+' '+(item.login_url||'')).toLocaleLowerCase().includes(query));
     if(!filtered.length){const wrap=document.createElement('div');wrap.className='empty';wrap.innerHTML='<div class="empty-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 10h8M8 14h6"/></svg></div><h4>'+(operations.length?'没有找到匹配的业务':'还没有业务操作')+'</h4><p>'+(operations.length?'试试其他名称或地址':'点击右上角「新增业务」开始配置')+'</p>';list.append(wrap)}
     for(const item of filtered){const button=document.createElement('button');button.className='operation'+(item.name===selectedName?' selected':'');button.type='button';button.setAttribute('aria-pressed',item.name===selectedName?'true':'false');const icon=document.createElement('span');icon.className='op-icon';icon.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5h16v11H4z"/><path d="M8 10h8M8 13.5h5"/></svg>';const copy=document.createElement('span');copy.className='op-copy';const name=document.createElement('div');name.className='op-name';name.textContent=item.name;const url=document.createElement('div');url.className='op-url';url.textContent=item.url;copy.append(name,url);const arrow=document.createElement('span');arrow.className='op-arrow';arrow.textContent='›';button.append(icon,copy,arrow);button.addEventListener('click',()=>{selectedName=item.name;renderOperations();renderDetail();renderTask()});list.append(button)}
     $('countValue').textContent=operations.length+' 项';
   }
-  function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u)}
+  function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
@@ -454,14 +531,14 @@ PAGE_HTML = r'''<!doctype html>
     const hasResult=phase==='done'&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
   async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
-  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
+  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('operationLoginUrl').value=item?(item.login_url||''):'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
   function closeModal(){$('modalBackdrop').classList.remove('open');editingName=''}
   $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
-  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
+  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim(),login_url=$('operationLoginUrl').value.trim();try{await api('/api/operations','POST',{name,url,login_url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
   $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;try{await api('/api/run','POST',{name:item.name});await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
-  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已提交')}catch(error){toast(error.message)}});
+  $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   refresh();setInterval(refresh,1300);
 </script>
 </body>
@@ -535,7 +612,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not name or len(name) > 60:
                     raise ValueError("业务名称须为 1–60 个字符。")
                 url = normalize_url(str(body.get("url", "")))
+                login_url = str(body.get("login_url", "")).strip()
                 operation = {"name": name, "url": url}
+                if login_url:
+                    operation["login_url"] = normalize_url(login_url)
                 with CONFIG_LOCK:
                     existing = load_operations()
                     if old_name and not any(item["name"] == old_name for item in existing):
