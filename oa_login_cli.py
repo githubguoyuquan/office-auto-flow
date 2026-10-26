@@ -2,6 +2,7 @@
 """Local OA automation workbench. Run with Python, then use its browser UI."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import io
 import json
@@ -29,6 +30,9 @@ WORKBENCH_PORT = 54418
 MAX_OUTPUT_LINES = 120
 MAX_BODY_BYTES = 32_768
 MAX_TEMPLATE_BYTES = 5 * 1024 * 1024
+MAX_BATCH_CODES = 200
+MAX_BATCH_FILE_BYTES = 5 * 1024 * 1024
+MAX_BATCH_WORKERS = 3
 CONFIG_LOCK = threading.Lock()
 DIRECTORY_PICKER_LOCK = threading.Lock()
 
@@ -201,6 +205,42 @@ def store_template(filename: str, encoded: str) -> dict:
     if not target.exists():
         target.write_bytes(content)
     return {"id": template_id, "name": Path(filename).name, "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
+
+
+def read_style_codes(filename: str, encoded: str) -> List[str]:
+    if not filename.lower().endswith(".xlsx"):
+        raise ValueError("批量款号文件必须是 .xlsx 格式。")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise ValueError("批量款号文件编码无效。")
+    if not content or len(content) > MAX_BATCH_FILE_BYTES:
+        raise ValueError("批量款号文件大小须在 5 MB 以内。")
+    from openpyxl import load_workbook
+
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as error:
+        raise ValueError(f"无法读取批量款号 XLSX 文件：{error}") from error
+    try:
+        sheet = workbook.worksheets[0]
+        codes = []
+        for row in sheet.iter_rows(min_col=1, max_col=1, values_only=True):
+            value = str(row[0] or "").strip().upper()
+            if not value:
+                continue
+            if not re.fullmatch(r"[A-Z0-9_-]{1,80}", value):
+                raise ValueError(f"第一列包含无效款号：{value[:80]}")
+            codes.append(value)
+            if len(codes) > MAX_BATCH_CODES:
+                raise ValueError(f"每批最多处理 {MAX_BATCH_CODES} 个款号。")
+        if not codes:
+            raise ValueError("XLSX 第一列没有可处理的款号。")
+        if len(set(codes)) != len(codes):
+            raise ValueError("XLSX 第一列有重复款号，请先去重后再运行。")
+        return codes
+    finally:
+        workbook.close()
 
 
 def business_operations(settings: dict) -> List[dict]:
@@ -585,6 +625,8 @@ class AutomationController:
                 "login_encountered": False,
                 "message": "正在打开业务页面…",
                 "operation": operation["name"],
+                "batch_total": len(operation.get("style_codes", [])) or 1,
+                "batch_completed": 0,
                 "title": "",
                 "url": "",
                 "content": "",
@@ -631,6 +673,8 @@ class AutomationController:
         return urlparse(page.url).path.lower().endswith("/login.html")
 
     def _wait_for_login(self, page: Any, operation: dict) -> None:
+        if operation.get("batch_isolated"):
+            raise RuntimeError("并发任务的登录会话已失效；请结束当前批次并重新运行。")
         submitted_at = None
         first_seen_at = time.monotonic()
         form_seen = False
@@ -847,7 +891,12 @@ class AutomationController:
                             context.add_init_script(LOGIN_SUBMIT_GUARD)
                             install_noah_login_compatibility(context)
                             install_noah_print_compatibility(context)
-                        self._run(operation, context)
+                        if len(operation.get("style_codes", [])) > 1:
+                            self._run_batch(operation, context)
+                        else:
+                            if operation.get("style_codes"):
+                                operation["style_code"] = operation["style_codes"][0]
+                            self._run(operation, context)
                     except Exception as error:
                         self.update("error", f"执行失败：{error}")
                         if context is not None:
@@ -870,7 +919,75 @@ class AutomationController:
                 except Exception:
                     pass
 
-    def _run(self, operation: dict, context: Any) -> None:
+    def _run_batch(self, operation: dict, primary_context: Any) -> None:
+        from playwright.sync_api import sync_playwright
+
+        codes = operation["style_codes"]
+        page = primary_context.pages[0] if primary_context.pages else primary_context.new_page()
+        self.update("opening", "正在检查 OA 会话，为并发任务准备登录状态…", step="open")
+        open_business_page(page, operation)
+        page.wait_for_timeout(1_800)
+        self.check_cancelled()
+        if self._on_login_page(page, operation):
+            self._wait_for_login(page, operation)
+            if not same_page(page.url, operation["url"]):
+                open_business_page(page, operation)
+                page.wait_for_timeout(1_200)
+            if self._on_login_page(page, operation):
+                raise RuntimeError("登录未完成，批量任务尚未启动。")
+        if not same_page(page.url, operation["url"]):
+            raise RuntimeError(f"未到达工艺单列表，当前地址：{page.url}")
+        storage_state = primary_context.storage_state()
+        results = {}
+        self.update("reading", f"已准备 {len(codes)} 个款号，最多 {min(MAX_BATCH_WORKERS, len(codes))} 项并发处理中…",
+                    step="query", batch_total=len(codes), batch_completed=0)
+
+        def execute(code: str) -> dict:
+            job = dict(operation, style_code=code, batch_isolated=True)
+            with sync_playwright() as playwright:
+                try:
+                    browser = playwright.chromium.launch(channel="msedge", headless=False)
+                except Exception:
+                    browser = playwright.chromium.launch(headless=False)
+                try:
+                    context = browser.new_context(storage_state=storage_state)
+                    context.add_init_script(LOGIN_SUBMIT_GUARD)
+                    install_noah_login_compatibility(context)
+                    install_noah_print_compatibility(context)
+                    try:
+                        return self._run(job, context, publish=False)
+                    finally:
+                        context.close()
+                finally:
+                    browser.close()
+
+        with ThreadPoolExecutor(max_workers=min(MAX_BATCH_WORKERS, len(codes))) as pool:
+            futures = {pool.submit(execute, code): code for code in codes}
+            for future in as_completed(futures):
+                code = futures[future]
+                try:
+                    result = future.result()
+                except Exception as error:
+                    result = {"phase": "error", "message": f"执行失败：{error}"}
+                results[code] = result
+                completed = len(results)
+                self.update(
+                    "reading", f"批量进度 {completed}/{len(codes)}；最近完成：{code}（{result['phase']}）",
+                    step="convert" if result["phase"] == "done" else "query",
+                    batch_total=len(codes), batch_completed=completed,
+                )
+
+        failures = [(code, results[code]) for code in codes if results[code]["phase"] != "done"]
+        lines = [f"{code}：{results[code].get('content') or results[code].get('message', results[code]['phase'])}"
+                 for code in codes]
+        summary = {"title": f"工艺单批量打印（{len(codes)} 个款号）",
+                   "url": operation["url"], "content": "\n".join(lines),
+                   "batch_total": len(codes), "batch_completed": len(codes)}
+        self.update("error" if failures else "done",
+                    f"批量任务结束：成功 {len(codes)-len(failures)} 个，失败 {len(failures)} 个。",
+                    step="convert", **summary)
+
+    def _run(self, operation: dict, context: Any, publish: bool = True) -> dict:
         final_phase = "error"
         final_message = "任务中断。"
         result = {}
@@ -901,22 +1018,24 @@ class AutomationController:
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
                 final_message = "完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
-                return
-            self.update("reading", "正在读取业务页面主要内容…", step="read")
-            result = {
-                "title": page.title(),
-                "url": page.url,
-                "content": main_page_text(page) or "页面没有可读取的文本内容。",
-            }
-            final_phase = "done"
-            final_message = "业务页面已打开，主要内容已读取。"
+            else:
+                self.update("reading", "正在读取业务页面主要内容…", step="read")
+                result = {
+                    "title": page.title(),
+                    "url": page.url,
+                    "content": main_page_text(page) or "页面没有可读取的文本内容。",
+                }
+                final_phase = "done"
+                final_message = "业务页面已打开，主要内容已读取。"
         except Cancelled:
             final_phase = "cancelled"
             final_message = "任务已停止。"
         except Exception as error:
             final_message = f"执行失败：{error}"
         finally:
-            self.update(final_phase, final_message, **result)
+            if publish:
+                self.update(final_phase, final_message, **result)
+        return {"phase": final_phase, "message": final_message, **result}
 
 
 PAGE_HTML = r'''<!doctype html>
@@ -1046,7 +1165,7 @@ PAGE_HTML = r'''<!doctype html>
             <div class="login-card" id="loginCard" hidden><h4>完成 OA 登录</h4><p>在这里填写账号密码后，工具会将其填入 OA 页面。验证码请在 OA 浏览器中输入，再点击页面上的“登录”。</p><form id="loginForm"><div class="login-grid"><div><label class="field-label" for="username">用户名</label><input class="field" id="username" autocomplete="username" required></div><div><label class="field-label" for="password">密码</label><input class="field" id="password" type="password" autocomplete="current-password" required></div></div><button class="primary login-submit" type="submit" id="loginButton">填入 OA 页面</button></form></div>
             <div class="run-actions"><button class="primary" id="runButton" disabled>开始运行</button><button class="ghost" id="stopButton" hidden>停止任务</button></div>
             <p class="fine-print">密码仅用于本次登录，不写入业务配置。浏览器会在读取页面后自动关闭。</p>
-            <div class="result" id="result" hidden><div class="result-top"><h4>页面主要内容</h4><span class="result-meta" id="resultTime"></span></div><div class="result-title" id="resultTitle"></div><p class="result-url" id="resultUrl"></p><pre id="resultContent"></pre></div>
+            <div class="result" id="result" hidden><div class="result-top"><h4 id="resultHeading">页面主要内容</h4><span class="result-meta" id="resultTime"></span></div><div class="result-title" id="resultTitle"></div><p class="result-url" id="resultUrl"></p><pre id="resultContent"></pre></div>
           </div>
         </section>
       </div>
@@ -1078,7 +1197,7 @@ PAGE_HTML = r'''<!doctype html>
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   const $ = id => document.getElementById(id);
   const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
-  printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"></div>
+  printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号（单个）</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"><label class="field-label" for="styleCodesFile" style="margin-top:12px">或上传批量款号 XLSX（第一列每行一个，不含表头）</label><input class="field" id="styleCodesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
     <div class="print-config"><label class="field-label" for="templateHistory">辅料格式模板（XLSX）</label><div class="picker-row"><select class="field" id="templateHistory"></select><button type="button" class="ghost" id="uploadTemplate">上传模板</button></div><input id="templateFile" type="file" hidden accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
     <div class="print-config"><label class="field-label" for="originalDir">完整工艺单 PDF 保存目录</label><div class="picker-row"><input class="field" id="originalDir" list="originalHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseOriginalDir">选择文件夹</button></div><datalist id="originalHistory"></datalist></div>
     <div class="print-config"><label class="field-label" for="convertedDir">辅料转换 XLSX 保存目录</label><div class="picker-row"><input class="field" id="convertedDir" list="convertedHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseConvertedDir">选择文件夹</button></div><datalist id="convertedHistory"></datalist></div>
@@ -1108,7 +1227,7 @@ PAGE_HTML = r'''<!doctype html>
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
-  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;return /^[A-Za-z0-9_-]{1,80}$/.test($('styleCode').value.trim())&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
+  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0];const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test($('styleCode').value.trim());return hasCodes&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
   function renderTimeline(item){
     const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','选择并打印'],['save_pdf','保存完整 PDF'],['convert','生成辅料 XLSX']]:[['open','打开业务页'],['read','读取页面内容']];
     const progress=item?.name===currentTask.operation?currentTask:{phase:'idle',step:'open',login_encountered:false};
@@ -1125,7 +1244,7 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
-    $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
+    $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
     for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
     const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=businessDescription(chosen);$('composerCopy').append(hint);
     document.querySelector('.page-title').textContent=chosen?chosen.name:'选择业务操作';document.querySelector('.page-desc').textContent=businessDescription(chosen);
@@ -1133,16 +1252,16 @@ PAGE_HTML = r'''<!doctype html>
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
     $('runButton').disabled=!canRun(chosen);$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
-    const hasResult=phase==='done'&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
+    const hasResult=(phase==='done'||(phase==='error'&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
   async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
   function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationDescription').value=item?item.description||'':'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
   function closeModal(){$('modalBackdrop').classList.remove('open');editingName=''}
   $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
   $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),description=$('operationDescription').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,description,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
-  for(const id of ['styleCode','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,renderTask)}
+  for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,renderTask)}
   $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
-  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!style_code){toast('请输入工艺单款号');$('styleCode').focus();return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});await api('/api/run','POST',{name:item.name,style_code});await refresh()}catch(error){toast(error.message)}});
+  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   refresh();setInterval(refresh,1300);
@@ -1187,7 +1306,12 @@ class LocalHandler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        limit = MAX_TEMPLATE_BYTES * 2 if self.path == "/api/template" else MAX_BODY_BYTES
+        if self.path == "/api/template":
+            limit = MAX_TEMPLATE_BYTES * 2
+        elif self.path == "/api/run":
+            limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
+        else:
+            limit = MAX_BODY_BYTES
         if length < 1 or length > limit:
             raise ValueError("请求内容大小无效。")
         value = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1279,10 +1403,20 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if operation is None:
                     raise ValueError("业务操作不存在，请刷新页面。")
                 if is_process_sheet(operation):
-                    style_code = str(body.get("style_code", "")).strip().upper()
-                    if not re.fullmatch(r"[A-Z0-9_-]{1,80}", style_code):
-                        raise ValueError("请输入有效款号（字母、数字、横线或下划线，最多 80 位）。")
-                    operation["style_code"] = style_code
+                    batch_file = body.get("style_codes_file")
+                    if batch_file is not None:
+                        if not isinstance(batch_file, dict):
+                            raise ValueError("批量款号文件数据无效。")
+                        codes = read_style_codes(str(batch_file.get("filename", "")),
+                                                 str(batch_file.get("content", "")))
+                    else:
+                        style_code = str(body.get("style_code", "")).strip().upper()
+                        if not re.fullmatch(r"[A-Z0-9_-]{1,80}", style_code):
+                            raise ValueError("请输入有效款号或选择批量 XLSX 文件。")
+                        codes = [style_code]
+                    operation["style_codes"] = codes
+                    if len(codes) == 1:
+                        operation["style_code"] = codes[0]
                     with CONFIG_LOCK:
                         print_settings = load_print_settings()
                     if not print_settings["original_dir"] or not print_settings["converted_dir"]:
