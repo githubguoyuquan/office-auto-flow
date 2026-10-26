@@ -455,6 +455,41 @@ class AutomationController:
             elif not form_seen and time.monotonic() - first_seen_at > 30:
                 raise RuntimeError("登录页加载超时：未找到可填写的用户名和密码输入框。")
 
+    def _wait_for_process_sheet(self, page: Any, operation: dict) -> None:
+        deadline = time.monotonic() + 60
+        recoveries = 0
+        while time.monotonic() < deadline:
+            self.check_cancelled()
+            if self._on_login_page(page, operation):
+                if recoveries >= 2:
+                    raise RuntimeError("业务页反复跳转登录，请检查该账号的业务权限或会话状态。")
+                self._wait_for_login(page, operation)
+                self.check_cancelled()
+                self.update("opening", "登录完成，正在继续工艺单打印…")
+                if not same_page(page.url, operation["url"]):
+                    page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                recoveries += 1
+                deadline = time.monotonic() + 60
+            elif not same_page(page.url, operation["url"]):
+                if recoveries >= 2:
+                    raise RuntimeError(f"无法进入工艺单列表，当前页面：{page.url}")
+                self.update("opening", "正在从当前页面返回工艺单列表…")
+                page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                recoveries += 1
+            else:
+                try:
+                    ready = page.evaluate("""() => !!(window.jQuery &&
+                      document.querySelector('input[name="styleCode"].searchMatnr') &&
+                      jQuery('#tb_user').data('bootstrap.table'))""")
+                    if ready:
+                        return
+                except Exception:
+                    # Navigation may destroy the JS context between checks.
+                    if page.is_closed():
+                        raise RuntimeError("OA 浏览器页面已关闭。")
+            page.wait_for_timeout(250)
+        raise RuntimeError(f"工艺单列表初始化超时，当前页面：{page.url}。请检查 OA 页面提示或脚本加载状态。")
+
     def _print_process_sheets(self, context: Any, page: Any, operation: dict) -> dict:
         style_code = operation["style_code"]
         printed = []
@@ -463,7 +498,7 @@ class AutomationController:
         while True:
             self.check_cancelled()
             self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…")
-            page.wait_for_function("() => window.jQuery && jQuery('#tb_user').data('bootstrap.table') && !jQuery.active", timeout=60_000)
+            self._wait_for_process_sheet(page, operation)
             page.locator('input[name="styleCode"].searchMatnr').fill(style_code)
             # Wait for Bootstrap Table's render event, not merely an HTTP response.
             page.evaluate("""() => { window.__aioaLoaded = false;
@@ -512,8 +547,6 @@ class AutomationController:
             # Keep each native print page alive; use another tab for the next row.
             page = context.new_page()
             page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
-            if self._on_login_page(page, operation):
-                raise RuntimeError(f"登录已失效；此前已打开 {len(printed)} 份工艺单。")
         page.close()
         if not printed:
             raise RuntimeError(f"没有与款号 {style_code} 完全匹配的工艺单。")
