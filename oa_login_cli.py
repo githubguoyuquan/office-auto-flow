@@ -376,10 +376,30 @@ def save_process_sheet_pdf(context: Any, page: Any, operation: dict, row: dict) 
         suffix += 1
 
     page.locator("#fcl").wait_for(state="visible", timeout=60_000)
-    trim_tables = page.locator("#fcl").evaluate("""element =>
-      [...element.querySelectorAll('table')].filter(table => table.querySelector('td.eachLie')).map(table =>
-        [...table.querySelectorAll('tr')].map(row =>
-          [...row.querySelectorAll('th,td')].map(cell => cell.innerText.trim())))""")
+    # Vue mounts the visible section before getAllData populates its material groups.
+    # Even an empty result is padded into a group by OA, so this also permits a
+    # genuinely empty sheet to finish loading and report its normal conversion error.
+    page.wait_for_function("""() => {
+      const section = document.querySelector('#fcl');
+      const vm = document.querySelector('#app')?.__vue__;
+      if (document.querySelector('#app') && (!vm || !vm.bomItemX?.length)) return false;
+      const cells = section ? [...section.querySelectorAll('td.eachLie')] : [];
+      return cells.length > 0 && cells.every(cell => !cell.textContent.includes('{{'));
+    }""", timeout=60_000)
+    trim_tables = page.locator("#fcl").evaluate("""element => {
+      const sections = [element];
+      // OA renders the second and remainder material pages as sibling sections.
+      for (let next = element.nextElementSibling;
+           next && next.querySelector('td.eachLie'); next = next.nextElementSibling) {
+        sections.push(next);
+      }
+      // Each tbody represents a separate group of materials; combining groups
+      // would overwrite repeated field names when transposing the table.
+      return sections.flatMap(section => [...section.querySelectorAll('tbody')])
+        .filter(body => body.querySelector('td.eachLie'))
+        .map(body => [...body.rows].filter(row => row.querySelector('td.eachLie'))
+          .map(row => [...row.cells].map(cell => cell.innerText.trim())));
+    }""")
     page.evaluate("""() => {
       window.__aioaPrintHtml = null;
       const original = jQuery.fn.print;
