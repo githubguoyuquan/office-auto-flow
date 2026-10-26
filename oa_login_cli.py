@@ -509,11 +509,26 @@ class AutomationController:
             self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…")
             self._wait_for_process_sheet(page, operation)
             page.locator('input[name="styleCode"].searchMatnr').fill(style_code)
-            # Wait for Bootstrap Table's render event, not merely an HTTP response.
-            page.evaluate("""() => { window.__aioaLoaded = false;
-              jQuery('#tb_user').one('load-success.bs.table', () => { window.__aioaLoaded = true; }); }""")
-            page.locator('button.btn_searchStyle').click()
-            page.wait_for_function("() => window.__aioaLoaded", timeout=60_000)
+            # The click can issue two table requests; the first load event may
+            # belong to stale rows. Match this query and its rendered row IDs.
+            with page.expect_response(
+                lambda response: "bomTitle/queryProcessSheet" in response.url
+                and response.request.method == "POST"
+                and style_code.lower() in (response.request.post_data or "").lower(),
+                timeout=60_000,
+            ) as query_response:
+                page.locator('button.btn_searchStyle').click()
+            payload = query_response.value.json()
+            if payload.get("code") != 10000 or not isinstance(payload.get("data"), dict):
+                raise RuntimeError(f"工艺单查询失败：{payload.get('message', '响应格式异常')}")
+            response_rows = payload["data"].get("list") or []
+            if not response_rows:
+                raise RuntimeError(f"款号 {style_code} 未查询到工艺单。")
+            expected_ids = [str(row.get("bomTitleId")) for row in response_rows]
+            page.wait_for_function("""ids => {
+              const rows = jQuery('#tb_user').bootstrapTable('getData');
+              return rows.length === ids.length && rows.every((r, i) => String(r.bomTitleId) === ids[i]);
+            }""", arg=expected_ids, timeout=20_000)
             page.evaluate("""() => { window.__aioaLoaded = false;
               jQuery('#tb_user').one('load-success.bs.table', () => { window.__aioaLoaded = true; }); }""")
             options = page.evaluate("() => {const o=jQuery('#tb_user').bootstrapTable('getOptions');return {page:o.pageNumber,total:o.totalRows,size:o.pageSize}}")
@@ -530,7 +545,7 @@ class AutomationController:
                 row_index = 0
                 continue
             row = rows[row_index]
-            if str(row["style"]).upper() != style_code:
+            if re.sub(r"\s+", "", str(row["style"])).upper() != style_code:
                 row_index += 1
                 continue
             key = str(row["id"])
@@ -558,7 +573,8 @@ class AutomationController:
             open_business_page(page, operation)
         page.close()
         if not printed:
-            raise RuntimeError(f"没有与款号 {style_code} 完全匹配的工艺单。")
+            samples = ", ".join(str(row.get("styleCode", "")) for row in response_rows[:5])
+            raise RuntimeError(f"查询返回了记录，但没有与款号 {style_code} 完全匹配的工艺单；返回款号示例：{samples}")
         result = {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
         self.update("awaiting_print", f"已打开 {len(printed)} 份打印页面。请在 OA 浏览器中检查或打印，完成后点击“结束打印”。", **result)
         while True:
