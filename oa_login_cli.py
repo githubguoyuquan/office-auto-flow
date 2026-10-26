@@ -408,6 +408,9 @@ def save_process_sheet_pdf(context: Any, page: Any, operation: dict, row: dict) 
         jQuery.fn.print = original;
         const copy = this.clone();
         if (options.noPrintSelector) copy.find(options.noPrintSelector).remove();
+        for (const marker of copy[0].querySelectorAll('table span[data-i18n="reqStorageDate"]')) {
+          marker.closest('th,td')?.remove();
+        }
         const styles = [...document.querySelectorAll('link[rel="stylesheet"],style')]
           .map(node => node.outerHTML).join('');
         const base = document.createElement('base'); base.href = location.href;
