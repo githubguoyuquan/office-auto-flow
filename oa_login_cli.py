@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Local OA automation workbench. Run with Python, then use its browser UI."""
 
+import base64
+import hashlib
+import io
 import json
 import os
 import queue
@@ -10,17 +13,21 @@ import sys
 import threading
 import time
 import webbrowser
+import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, List
 from urllib.parse import parse_qs, urlparse
 
+from trim_template import render_trim_pdf
+
 
 APP_NAME = "oa-login-cli"
 WORKBENCH_PORT = 54418
 MAX_OUTPUT_LINES = 120
 MAX_BODY_BYTES = 32_768
+MAX_TEMPLATE_BYTES = 5 * 1024 * 1024
 CONFIG_LOCK = threading.Lock()
 
 
@@ -85,6 +92,71 @@ def load_settings() -> dict:
     if not login_url:
         login_url = next((item["url"] for item in operations if urlparse(item["url"]).path.lower().endswith("/login.html")), "")
     return {"login_url": login_url}
+
+
+def load_print_settings() -> dict:
+    path = data_dir() / "print-settings.json"
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        saved = {}
+    return {
+        "original_dir": str(saved.get("original_dir", "")),
+        "converted_dir": str(saved.get("converted_dir", "")),
+        "original_history": list(saved.get("original_history", []))[:10],
+        "converted_history": list(saved.get("converted_history", []))[:10],
+        "templates": list(saved.get("templates", []))[:10],
+        "template_id": str(saved.get("template_id", "")),
+    }
+
+
+def save_print_settings(settings: dict) -> None:
+    target = data_dir() / "print-settings.json"
+    temporary = target.with_suffix(".tmp")
+    temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(temporary, target)
+
+
+def output_directory(value: str) -> Path:
+    path = Path(value.strip()).expanduser()
+    if not value.strip() or not path.is_absolute():
+        raise ValueError("请输入绝对保存目录，例如 C:\\工艺单 或 /Users/姓名/工艺单。")
+    path.mkdir(parents=True, exist_ok=True)
+    if not path.is_dir() or not os.access(path, os.W_OK):
+        raise ValueError(f"保存目录不可写：{path}")
+    return path
+
+
+def remember_directory(settings: dict, field: str, value: str) -> None:
+    path = str(output_directory(value))
+    settings[field] = path
+    history = field.replace("_dir", "_history")
+    settings[history] = [path] + [item for item in settings[history] if item != path][:9]
+
+
+def store_template(filename: str, encoded: str) -> dict:
+    if not filename.lower().endswith(".xlsx"):
+        raise ValueError("模板必须是 .xlsx 文件。")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (ValueError, base64.binascii.Error):
+        raise ValueError("模板文件编码无效。")
+    if not content or len(content) > MAX_TEMPLATE_BYTES:
+        raise ValueError("模板大小须在 5 MB 以内。")
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            names = archive.namelist()
+            if "xl/workbook.xml" not in names or sum(item.file_size for item in archive.infolist()) > 25 * 1024 * 1024:
+                raise ValueError("模板不是有效的 XLSX 工作簿，或解压后过大。")
+    except zipfile.BadZipFile:
+        raise ValueError("模板不是有效的 XLSX 工作簿。")
+    template_id = hashlib.sha256(content).hexdigest()[:20]
+    folder = data_dir() / "templates"
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / f"{template_id}.xlsx"
+    if not target.exists():
+        target.write_bytes(content)
+    return {"id": template_id, "name": Path(filename).name, "uploaded_at": datetime.now().strftime("%Y-%m-%d %H:%M")}
 
 
 def business_operations(settings: dict) -> List[dict]:
@@ -246,6 +318,61 @@ def main_page_text(page: Any) -> str:
     if len(useful) > MAX_OUTPUT_LINES:
         useful = useful[:MAX_OUTPUT_LINES] + ["……（内容已截断）"]
     return "\n".join(useful)
+
+
+def save_process_sheet_pdf(context: Any, page: Any, operation: dict, row: dict) -> tuple:
+    style_code = operation["style_code"]
+    directory = output_directory(operation["print_settings"]["original_dir"])
+    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(row["id"]))[:50]
+    stem = f"{style_code}_次数{row['seq']}_{safe_id}"
+    destination = directory / f"{stem}.pdf"
+    suffix = 2
+    while destination.exists():
+        destination = directory / f"{stem}_{suffix}.pdf"
+        suffix += 1
+
+    page.locator("#fcl").wait_for(state="visible", timeout=60_000)
+    trim_tables = page.locator("#fcl").evaluate("""element =>
+      [...element.querySelectorAll('table')].filter(table => table.querySelector('td.eachLie')).map(table =>
+        [...table.querySelectorAll('tr')].map(row =>
+          [...row.querySelectorAll('th,td')].map(cell => cell.innerText.trim())))""")
+    page.evaluate("""() => {
+      window.__aioaPrintHtml = null;
+      const original = jQuery.fn.print;
+      jQuery.fn.print = function(options) {
+        jQuery.fn.print = original;
+        const copy = this.clone();
+        if (options.noPrintSelector) copy.find(options.noPrintSelector).remove();
+        const styles = [...document.querySelectorAll('link[rel="stylesheet"],style')]
+          .map(node => node.outerHTML).join('');
+        const base = document.createElement('base'); base.href = location.href;
+        window.__aioaPrintHtml = '<!doctype html><html><head>'+base.outerHTML+styles+
+          '</head><body>'+copy[0].outerHTML+'</body></html>';
+        return jQuery.Deferred().resolve();
+      };
+    }""")
+    page.locator("button.printBtn").click()
+    page.wait_for_function("() => !!window.__aioaPrintHtml", timeout=15_000)
+    html = page.evaluate("() => window.__aioaPrintHtml")
+    print_page = context.new_page()
+    temporary = destination.with_suffix(".tmp.pdf")
+    try:
+        print_page.set_content(html, wait_until="domcontentloaded")
+        print_page.wait_for_function("() => [...document.images].every(image => image.complete)", timeout=45_000)
+        print_page.pdf(path=str(temporary), format="A4", landscape=True,
+                       prefer_css_page_size=True, print_background=True)
+        os.replace(temporary, destination)
+    finally:
+        print_page.close()
+        if temporary.exists():
+            temporary.unlink()
+
+    source_dir = data_dir() / "trim-sources"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    source = source_dir / f"{hashlib.sha256(str(destination).encode()).hexdigest()[:20]}.json"
+    source.write_text(json.dumps({"style_code": style_code, "row": row,
+                                  "tables": trim_tables}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return destination, source, trim_tables
 
 
 def launch_context(playwright: Any) -> Any:
@@ -593,8 +720,23 @@ class AutomationController:
             actual_id = parse_qs(urlparse(page.url).query).get("bomtitleid", [None])[0]
             if actual_id != key:
                 raise RuntimeError(f"打开的工艺单与所选行不一致（预期 {key}，实际 {actual_id}）。")
+            self.update("reading", f"正在保存第 {len(printed)+1} 份完整工艺单 PDF…")
+            saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
+            self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 PDF…")
+            template_id = operation["print_settings"]["template_id"]
+            template_path = data_dir() / "templates" / f"{template_id}.xlsx"
+            converted_dir = output_directory(operation["print_settings"]["converted_dir"])
+            converted_pdf = converted_dir / f"{saved_pdf.stem}_辅料信息.pdf"
+            version = 2
+            while converted_pdf.exists():
+                converted_pdf = converted_dir / f"{saved_pdf.stem}_辅料信息_{version}.pdf"
+                version += 1
+            try:
+                conversion = render_trim_pdf(context, template_path, trim_tables, converted_pdf)
+            except Exception as error:
+                raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             seen.add(key)
-            printed.append(f"{style_code} / 次数 {row['seq']}：{page.url}")
+            printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料PDF {converted_pdf}（{conversion['rows']} 条）")
             row_index += 1
             # Keep each native print page alive; use another tab for the next row.
             page = context.new_page()
@@ -604,18 +746,7 @@ class AutomationController:
             samples = ", ".join(str(row.get("styleCode", "")) for row in response_rows[:5])
             raise RuntimeError(f"查询返回了记录，但没有与款号 {style_code} 完全匹配的工艺单；返回款号示例：{samples}")
         result = {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
-        self.update("awaiting_print", f"已打开 {len(printed)} 份打印页面。请在 OA 浏览器中检查或打印，完成后点击“结束打印”。", **result)
-        while True:
-            self.check_cancelled()
-            try:
-                if self.messages.get_nowait()[0] == "finish_print":
-                    return result
-            except queue.Empty:
-                pass
-            remaining = [tab for tab in context.pages if not tab.is_closed()]
-            if not remaining:
-                return result
-            remaining[0].wait_for_timeout(250)
+        return result
 
     def _worker_loop(self) -> None:
         context = None
@@ -687,7 +818,7 @@ class AutomationController:
             if is_process_sheet(operation):
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
-                final_message = "工艺单打印流程已结束（实际打印结果请以浏览器或打印机为准）。"
+                final_message = "完整工艺单与辅料信息 PDF 已保存，请检查文件内容。"
                 return
             self.update("reading", "正在读取业务页面主要内容…")
             result = {
@@ -776,6 +907,11 @@ PAGE_HTML = r'''<!doctype html>
     html[data-theme="dark"] .login-card,html[data-theme="dark"] .result pre{background:#272727;border-color:#424242;color:#ddd}
     html[data-theme="dark"] .field{background:#212121;border-color:#505050;color:#eee}html[data-theme="dark"] .field:focus,html[data-theme="dark"] .search:focus{border-color:#999;box-shadow:0 0 0 3px #ffffff12}
     html[data-theme="dark"] .run-actions{background:#303030;border-color:#424242;box-shadow:none}
+    #printFields{display:grid;gap:8px;margin-top:20px}
+    #printFields .field-label{margin-top:8px}
+    #printFields .field{width:100%}
+    #printFields input[type=file]{padding:9px}
+    #printFields:not([hidden]) + .run-actions{position:static;margin-top:22px}
     html[data-theme="dark"] .primary{background:#ececec;color:#222}html[data-theme="dark"] .primary:hover:not(:disabled){background:#fff}
     html[data-theme="dark"] .ghost{background:transparent;color:#ddd;border-color:#555}html[data-theme="dark"] .ghost:hover:not(:disabled){background:#3a3a3a}
     html[data-theme="dark"] .modal{background:#292929;color:#eee}html[data-theme="dark"] .modal-backdrop{background:#0009}html[data-theme="dark"] .toast{background:#eee;color:#222}
@@ -853,10 +989,12 @@ PAGE_HTML = r'''<!doctype html>
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   const $ = id => document.getElementById(id);
   const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
-  printFields.innerHTML='<label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"><p class="panel-sub">逐行打开精确匹配款号的工艺单，包含全部打印项。</p>';
+  printFields.innerHTML=`<label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B">
+    <label class="field-label" for="originalDir">完整工艺单 PDF 保存目录</label><input class="field" id="originalDir" list="originalHistory" placeholder="填写绝对路径；点击输入框选择历史目录"><datalist id="originalHistory"></datalist>
+    <label class="field-label" for="convertedDir">辅料转换 PDF 保存目录</label><input class="field" id="convertedDir" list="convertedHistory" placeholder="填写绝对路径；点击输入框选择历史目录"><datalist id="convertedHistory"></datalist>
+    <label class="field-label" for="templateHistory">辅料格式模板（XLSX）</label><select class="field" id="templateHistory"></select><input class="field" id="templateFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+    <p class="panel-sub">默认使用上次的目录和模板；可从历史目录或模板列表中切换。</p>`;
   document.querySelector('.run-actions').before(printFields);
-  const finishPrint=document.createElement('button');finishPrint.id='finishPrint';finishPrint.className='primary';finishPrint.textContent='结束打印';finishPrint.hidden=true;document.querySelector('.run-actions').append(finishPrint);
-  finishPrint.onclick=async()=>{try{await api('/api/finish-print','POST',{});await refresh()}catch(error){toast(error.message)}};
   function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.hostname==='noah.vgrass.com'&&u.pathname.endsWith('/plm/styleManage/newStyleManage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
@@ -867,9 +1005,11 @@ PAGE_HTML = r'''<!doctype html>
   settingsModal.addEventListener('click',event=>{if(event.target===settingsModal)$('closeSettings').click()});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&settingsModal.classList.contains('open'))$('closeSettings').click()});
   $('settingsForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});$('closeSettings').click();await refresh();toast('系统设置已保存')}catch(error){toast(error.message)}};
-  let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false;
-  const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping','awaiting_print']);
-  const labels = {awaiting_print:'等待打印完成',idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
+  let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false, printSettingsInitialized = false, lastPrintSettingsKey = '';
+  function syncPrintSettings(settings){if(!settings)return;const key=JSON.stringify([settings.original_history,settings.converted_history,settings.templates,settings.template_id]);if(printSettingsInitialized&&key===lastPrintSettingsKey)return;lastPrintSettingsKey=key;if(!printSettingsInitialized){$('originalDir').value=settings.original_dir||'';$('convertedDir').value=settings.converted_dir||'';printSettingsInitialized=true}for(const [name,values] of [['originalHistory',settings.original_history],['convertedHistory',settings.converted_history]]){const list=$(name);list.replaceChildren();for(const value of values||[]){const option=document.createElement('option');option.value=value;list.append(option)}}const select=$('templateHistory'),before=select.value;select.replaceChildren();const empty=document.createElement('option');empty.value='';empty.textContent='请选择或上传 XLSX 模板';select.append(empty);for(const item of settings.templates||[]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name+' · '+item.uploaded_at;select.append(option)}select.value=before&&[...select.options].some(o=>o.value===before)?before:(settings.template_id||'')}
+  $('templateFile').addEventListener('change',async()=>{const file=$('templateFile').files[0];if(!file)return;if(file.size>5*1024*1024){toast('模板不能超过 5 MB');return}try{const content=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('模板读取失败'));reader.readAsDataURL(file)});const data=await api('/api/template','POST',{filename:file.name,content});await refresh();$('templateHistory').value=data.template.id;toast('模板已保存，下次默认使用')}catch(error){toast(error.message)}});
+  const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
+  const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
   function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('show'),3600)}
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
@@ -881,21 +1021,21 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
-    $('printFields').hidden=!isPrintOperation(selected());$('finishPrint').hidden=currentTask.phase!=='awaiting_print';$('styleCode').disabled=runningPhases.has(currentTask.phase);
+    $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','originalDir','convertedDir','templateHistory','templateFile'])$(id).disabled=runningPhases.has(currentTask.phase);
     const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=isPrintOperation(chosen)?'验证登录 · 查询款号 · 逐行打开全部打印项':'打开业务页面 · 验证登录 · 读取内容';$('composerCopy').append(hint);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
     $('runButton').disabled=!selected()||active;$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     let step=phase==='idle'?1:phase==='opening'?1:['login_required','authenticating'].includes(phase)?2:3;for(let i=1;i<=3;i++){const node=$('step'+i);node.className='step'+(i<step?' complete':i===step?' active':'')}
-    const hasResult=['done','awaiting_print'].includes(phase)&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
+    const hasResult=phase==='done'&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
-  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
+  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
   function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
   function closeModal(){$('modalBackdrop').classList.remove('open');editingName=''}
   $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
   $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
   $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
-  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!style_code){toast('请输入工艺单款号');$('styleCode').focus();return}try{await api('/api/run','POST',{name:item.name,style_code});await refresh()}catch(error){toast(error.message)}});
+  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!style_code){toast('请输入工艺单款号');$('styleCode').focus();return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});await api('/api/run','POST',{name:item.name,style_code});await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   refresh();setInterval(refresh,1300);
@@ -940,7 +1080,8 @@ class LocalHandler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if length < 1 or length > MAX_BODY_BYTES:
+        limit = MAX_TEMPLATE_BYTES * 2 if self.path == "/api/template" else MAX_BODY_BYTES
+        if length < 1 or length > limit:
             raise ValueError("请求内容大小无效。")
         value = json.loads(self.rfile.read(length).decode("utf-8"))
         if not isinstance(value, dict):
@@ -956,7 +1097,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             with CONFIG_LOCK:
                 settings = load_settings()
                 operations = business_operations(settings)
-            self._send(200, {"operations": operations, "settings": settings, "task": CONTROLLER.snapshot()})
+                print_settings = load_print_settings()
+            self._send(200, {"operations": operations, "settings": settings, "print_settings": print_settings, "task": CONTROLLER.snapshot()})
         else:
             self._send(404, {"error": "页面不存在。"})
 
@@ -966,7 +1108,26 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
-            if self.path == "/api/settings":
+            if self.path == "/api/print-settings":
+                with CONFIG_LOCK:
+                    settings = load_print_settings()
+                    remember_directory(settings, "original_dir", str(body.get("original_dir", "")))
+                    remember_directory(settings, "converted_dir", str(body.get("converted_dir", "")))
+                    template_id = str(body.get("template_id", ""))
+                    if template_id and not any(item["id"] == template_id for item in settings["templates"]):
+                        raise ValueError("模板不存在，请重新上传。")
+                    settings["template_id"] = template_id
+                    save_print_settings(settings)
+                self._send(200, {"ok": True})
+            elif self.path == "/api/template":
+                template = store_template(str(body.get("filename", "")), str(body.get("content", "")))
+                with CONFIG_LOCK:
+                    settings = load_print_settings()
+                    settings["templates"] = [template] + [item for item in settings["templates"] if item["id"] != template["id"]][:9]
+                    settings["template_id"] = template["id"]
+                    save_print_settings(settings)
+                self._send(200, {"ok": True, "template": template})
+            elif self.path == "/api/settings":
                 value = str(body.get("login_url", "")).strip()
                 settings = {"login_url": normalize_url(value) if value else ""}
                 with CONFIG_LOCK:
@@ -1010,12 +1171,14 @@ class LocalHandler(BaseHTTPRequestHandler):
                     if not re.fullmatch(r"[A-Z0-9_-]{1,80}", style_code):
                         raise ValueError("请输入有效款号（字母、数字、横线或下划线，最多 80 位）。")
                     operation["style_code"] = style_code
+                    with CONFIG_LOCK:
+                        print_settings = load_print_settings()
+                    if not print_settings["original_dir"] or not print_settings["converted_dir"]:
+                        raise ValueError("请先设置两种 PDF 的保存目录。")
+                    if not print_settings["template_id"]:
+                        raise ValueError("请先上传 XLSX 模板。")
+                    operation["print_settings"] = print_settings
                 CONTROLLER.start(operation)
-                self._send(200, {"ok": True})
-            elif self.path == "/api/finish-print":
-                if CONTROLLER.snapshot()["phase"] != "awaiting_print":
-                    raise ValueError("当前没有待结束的打印任务。")
-                CONTROLLER.messages.put(("finish_print",))
                 self._send(200, {"ok": True})
             elif self.path == "/api/credentials":
                 CONTROLLER.submit_credentials(str(body.get("username", "")), str(body.get("password", "")))

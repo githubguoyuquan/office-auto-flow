@@ -1,6 +1,6 @@
 # Office Auto Flow
 
-本地运行的 OA 浏览器自动化工作台。当前版本提供业务入口管理、登录协助和页面内容读取；单号查询与列表操作将在后续迭代中加入。
+本地运行的 OA 浏览器自动化工作台，支持业务入口管理、登录协助、页面内容读取和工艺单打印。
 
 ## Windows 启动
 
@@ -8,7 +8,7 @@
 2. 将项目文件放在同一文件夹。
 3. 双击 `start_oa_login.bat`。
 
-首次启动会在 `%LOCALAPPDATA%\oa-login-cli\venv` 创建独立 Python 环境并安装 Playwright。随后工作台会在浏览器中打开。关闭启动用的命令窗口即可退出本地服务。
+首次启动会在 `%LOCALAPPDATA%\oa-login-cli\venv` 创建独立 Python 环境并安装 Playwright、openpyxl。随后工作台会在浏览器中打开。关闭启动用的命令窗口即可退出本地服务。
 
 ## 当前功能
 
@@ -17,8 +17,12 @@
 - 在工作台提交登录信息，或在自动打开的 OA 浏览器中手动完成登录及二次验证。
 - 登录后返回原业务页面，并显示页面标题、地址和正文（包含可读取的 iframe 内容）。
 - 登录凭据仅用于当前运行，不保存到业务配置。
+- 工艺单打印：输入款号，选择完整工艺单 PDF 和辅料 PDF 的保存目录，上传 XLSX 模板，然后启动任务。下次默认使用上次的目录和模板，也可从历史记录选择。
+- 系统依次查询匹配款号的工艺单、勾选全部打印项、点击 OA 打印按钮，并自动保存完整工艺单 PDF 和按模板生成的辅料信息 PDF。无需操作浏览器的系统保存弹窗。
 
-业务配置保存在 `%APPDATA%\oa-login-cli\operations.json`，浏览器会话保存在 `%APPDATA%\oa-login-cli\browser-profile`。
+辅料模板读取第一个工作表，在前 40 行中自动寻找与 OA 辅料字段对应的表头；表头下一行须为空白数据行。可自动匹配列名相同或高度相似的字段，至少需要两列匹配。列名无法确定、模板含图片或图表时，任务会明确报错，避免生成错误内容。当前 PDF 保留单元格的基本字体、颜色、对齐、行高、列宽和合并关系；复杂 Excel 版式需要用实际模板验证。
+
+业务配置保存在 `%APPDATA%\oa-login-cli\operations.json`，打印设置、上传模板和辅料源数据也保存在该目录，浏览器会话保存在 `%APPDATA%\oa-login-cli\browser-profile`。
 
 ## 分支与版本
 
@@ -32,5 +36,6 @@
 ## 文件
 
 - `oa_login_cli.py`：本地 Web 服务、界面和 Playwright 自动化入口。
+- `trim_template.py`：读取 XLSX 模板、匹配辅料字段并生成 PDF。
 - `start_oa_login.ps1`：创建 Python 环境、安装 Playwright 并启动应用。
 - `start_oa_login.bat`：双击启动 PowerShell 脚本。

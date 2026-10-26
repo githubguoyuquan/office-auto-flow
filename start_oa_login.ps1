@@ -15,6 +15,10 @@ $appScript = Join-Path $PSScriptRoot "oa_login_cli.py"
 if (-not (Test-Path -LiteralPath $appScript -PathType Leaf)) {
     Stop-WithMessage "oa_login_cli.py was not found beside this launcher."
 }
+$trimModule = Join-Path $PSScriptRoot "trim_template.py"
+if (-not (Test-Path -LiteralPath $trimModule -PathType Leaf)) {
+    Stop-WithMessage "trim_template.py was not found beside this launcher."
+}
 
 $bootstrapExe = $null
 $bootstrapArgs = @()
@@ -56,6 +60,18 @@ if (-not (Test-Path -LiteralPath $playwrightModule -PathType Container)) {
     $ErrorActionPreference = "Stop"
     if ($pipExitCode -ne 0) {
         Stop-WithMessage "Failed to install Playwright. Check the network or proxy settings."
+    }
+}
+
+$openpyxlModule = Join-Path $venvRoot "Lib\site-packages\openpyxl"
+if (-not (Test-Path -LiteralPath $openpyxlModule -PathType Container)) {
+    Write-Host "Installing XLSX template support..." -ForegroundColor Cyan
+    $ErrorActionPreference = "Continue"
+    & $venvPython -m pip install --disable-pip-version-check "openpyxl==3.1.5"
+    $pipExitCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+    if ($pipExitCode -ne 0) {
+        Stop-WithMessage "Failed to install XLSX template support. Check the network or proxy settings."
     }
 }
 
