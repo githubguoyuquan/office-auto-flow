@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 APP_NAME = "oa-login-cli"
+WORKBENCH_PORT = 54418
 MAX_OUTPUT_LINES = 120
 MAX_BODY_BYTES = 32_768
 CONFIG_LOCK = threading.Lock()
@@ -1044,7 +1045,11 @@ class LocalHandler(BaseHTTPRequestHandler):
 
 def run() -> int:
     configure_console()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), LocalHandler)
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", WORKBENCH_PORT), LocalHandler)
+    except OSError as error:
+        print(f"工作台端口 {WORKBENCH_PORT} 无法使用，请先关闭旧工作台后重试：{error}", file=sys.stderr)
+        return 1
     address = f"http://127.0.0.1:{server.server_port}/"
     print(f"AIOA 工作台已启动：{address}")
     print("关闭此窗口可退出；也可在这里按 Ctrl+C。")
