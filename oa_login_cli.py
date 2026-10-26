@@ -193,7 +193,6 @@ def open_business_page(page: Any, operation: dict) -> None:
     if (urlparse(target).path.lower().endswith("/login.html")
             or (operation.get("login_url") and same_page(target, operation["login_url"]))):
         raise ValueError("业务地址指向登录页，已阻止主动跳转。")
-    print(f"AIOA 主动打开业务页：{urlparse(target).path}")
     page.goto(target, wait_until="domcontentloaded", timeout=60_000)
 
 
@@ -618,15 +617,6 @@ class AutomationController:
                             context = launch_context(playwright)
                             context.add_init_script(LOGIN_SUBMIT_GUARD)
                             install_noah_login_compatibility(context)
-                            def log_navigation(tab: Any) -> None:
-                                def on_navigation(frame: Any) -> None:
-                                    if frame == tab.main_frame:
-                                        print(f"OA 浏览器进入：{urlparse(frame.url).path}")
-                                tab.on("framenavigated", on_navigation)
-
-                            context.on("page", log_navigation)
-                            for existing_tab in context.pages:
-                                log_navigation(existing_tab)
                         self._run(operation, context)
                     except Exception as error:
                         self.update("error", f"执行失败：{error}")
