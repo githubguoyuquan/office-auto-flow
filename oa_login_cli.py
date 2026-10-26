@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, List
 from urllib.parse import parse_qs, urlparse
 
-from trim_template import render_trim_pdf
+from trim_template import export_trim_xlsx
 
 
 APP_NAME = "oa-login-cli"
@@ -140,7 +140,7 @@ def choose_directory(initial: str) -> str:
             script = '''on run argv
                 try
                     activate
-                    return POSIX path of (choose folder with prompt "选择 PDF 保存目录" default location (POSIX file (item 1 of argv)))
+                    return POSIX path of (choose folder with prompt "选择保存目录" default location (POSIX file (item 1 of argv)))
                 on error number -128
                     return ""
                 end try
@@ -151,7 +151,7 @@ def choose_directory(initial: str) -> str:
             script = '''[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
                 Add-Type -AssemblyName System.Windows.Forms
                 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-                $dialog.Description = 'Select PDF output folder'
+                $dialog.Description = 'Select output folder'
                 $dialog.SelectedPath = $env:AIOA_PICKER_INITIAL
                 $dialog.ShowNewFolderButton = $true
                 try {
@@ -786,26 +786,26 @@ class AutomationController:
                 raise RuntimeError(f"打开的工艺单与所选行不一致（预期 {key}，实际 {actual_id}）。")
             self.update("reading", f"正在保存第 {len(printed)+1} 份完整工艺单 PDF…")
             saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
-            self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 PDF…")
+            self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 XLSX…")
             template_id = operation["print_settings"]["template_id"]
             template_path = data_dir() / "templates" / f"{template_id}.xlsx"
             converted_dir = output_directory(operation["print_settings"]["converted_dir"])
-            converted_pdf = converted_dir / f"{saved_pdf.stem}_辅料信息.pdf"
+            converted_xlsx = converted_dir / f"{saved_pdf.stem}_辅料信息.xlsx"
             version = 2
-            while converted_pdf.exists():
-                converted_pdf = converted_dir / f"{saved_pdf.stem}_辅料信息_{version}.pdf"
+            while converted_xlsx.exists():
+                converted_xlsx = converted_dir / f"{saved_pdf.stem}_辅料信息_{version}.xlsx"
                 version += 1
             try:
                 official_style = page.evaluate("""() =>
                   document.querySelector('#app')?.__vue__?.bomTitle?.style_code || ''""")
-                conversion = render_trim_pdf(
-                    context, template_path, trim_tables, converted_pdf,
+                conversion = export_trim_xlsx(
+                    template_path, trim_tables, converted_xlsx,
                     shared_fields={"正式款号": str(official_style or row["style"]).strip()},
                 )
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             seen.add(key)
-            printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料PDF {converted_pdf}（{conversion['rows']} 条）")
+            printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
             row_index += 1
             # Keep each native print page alive; use another tab for the next row.
             page = context.new_page()
@@ -887,7 +887,7 @@ class AutomationController:
             if is_process_sheet(operation):
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
-                final_message = "完整工艺单与辅料信息 PDF 已保存，请检查文件内容。"
+                final_message = "完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
                 return
             self.update("reading", "正在读取业务页面主要内容…")
             result = {
@@ -1066,7 +1066,7 @@ PAGE_HTML = r'''<!doctype html>
   printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"></div>
     <div class="print-config"><label class="field-label" for="templateHistory">辅料格式模板（XLSX）</label><div class="picker-row"><select class="field" id="templateHistory"></select><button type="button" class="ghost" id="uploadTemplate">上传模板</button></div><input id="templateFile" type="file" hidden accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
     <div class="print-config"><label class="field-label" for="originalDir">完整工艺单 PDF 保存目录</label><div class="picker-row"><input class="field" id="originalDir" list="originalHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseOriginalDir">选择文件夹</button></div><datalist id="originalHistory"></datalist></div>
-    <div class="print-config"><label class="field-label" for="convertedDir">辅料转换 PDF 保存目录</label><div class="picker-row"><input class="field" id="convertedDir" list="convertedHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseConvertedDir">选择文件夹</button></div><datalist id="convertedHistory"></datalist></div>
+    <div class="print-config"><label class="field-label" for="convertedDir">辅料转换 XLSX 保存目录</label><div class="picker-row"><input class="field" id="convertedDir" list="convertedHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseConvertedDir">选择文件夹</button></div><datalist id="convertedHistory"></datalist></div>
     <p class="panel-sub">默认使用上次的目录和模板；可从历史目录或模板列表中切换。</p>`;
   document.querySelector('.run-actions').before(printFields);
   let choosingDirectory=false;
@@ -1256,7 +1256,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     with CONFIG_LOCK:
                         print_settings = load_print_settings()
                     if not print_settings["original_dir"] or not print_settings["converted_dir"]:
-                        raise ValueError("请先设置两种 PDF 的保存目录。")
+                        raise ValueError("请先设置完整工艺单与辅料表格的保存目录。")
                     if not print_settings["template_id"]:
                         raise ValueError("请先上传 XLSX 模板。")
                     operation["print_settings"] = print_settings

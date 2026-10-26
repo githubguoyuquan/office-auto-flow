@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import html
+from copy import copy
 import os
 import re
 import unicodedata
@@ -73,119 +73,70 @@ def _match_columns(sheet, records: list[dict]) -> tuple[int, dict[int, str]]:
     return best_row, best_map
 
 
-def _rgb(color) -> str | None:
-    if color is not None and color.type == "rgb" and isinstance(color.rgb, str):
-        return "#" + color.rgb[-6:]
-    return None
 
-
-def _cell_css(cell) -> str:
-    parts = ["border:1px solid #999", "padding:4px 6px", "white-space:pre-wrap"]
-    if cell.font.bold:
-        parts.append("font-weight:700")
-    if cell.font.sz:
-        parts.append(f"font-size:{cell.font.sz}pt")
-    foreground = _rgb(cell.font.color)
-    if foreground:
-        parts.append(f"color:{foreground}")
-    background = _rgb(cell.fill.fgColor) if cell.fill.patternType == "solid" else None
-    if background:
-        parts.append(f"background:{background}")
-    if cell.alignment.horizontal in {"left", "center", "right"}:
-        parts.append(f"text-align:{cell.alignment.horizontal}")
-    if cell.alignment.vertical in {"top", "center", "bottom"}:
-        parts.append(f"vertical-align:{'middle' if cell.alignment.vertical == 'center' else cell.alignment.vertical}")
-    return ";".join(parts)
-
-
-def _render_html(sheet, records: list[dict], header_row: int, mapping: dict[int, str]) -> str:
-    data_row = header_row + 1
-    if any(range_.min_row <= data_row <= range_.max_row for range_ in sheet.merged_cells.ranges):
-        raise ValueError("模板数据起始行包含合并单元格，无法安全自动填充。")
-    if any(sheet.cell(data_row, column).value not in (None, "") for column in mapping):
-        raise ValueError("模板表头下一行已有数据，请提供空白数据行作为填充位置。")
-    if sheet._images or sheet._charts:
-        raise ValueError("模板包含图片或图表，当前无法保证 PDF 版式准确。")
-
-    extra = len(records) - 1
-    spans = {}
-    skipped = set()
-    for merged in sheet.merged_cells.ranges:
-        start = merged.min_row + (extra if merged.min_row > data_row else 0)
-        end = merged.max_row + (extra if merged.max_row > data_row else 0)
-        spans[(start, merged.min_col)] = (end - start + 1, merged.max_col - merged.min_col + 1)
-        for row in range(start, end + 1):
-            for col in range(merged.min_col, merged.max_col + 1):
-                if (row, col) != (start, merged.min_col):
-                    skipped.add((row, col))
-
-    max_column = min(max(sheet.max_column, max(mapping)), 60)
-    if sheet.max_row > 200 or max_column > 50:
-        raise ValueError("模板首个工作表过大，请提供只包含目标版式的模板。")
-    widths = []
-    from openpyxl.utils import get_column_letter
-
-    for col in range(1, max_column + 1):
-        width = sheet.column_dimensions[get_column_letter(col)].width or 12
-        widths.append(f'<col style="width:{max(5, min(width, 50))}ch">')
-
-    rows_html = []
-    for output_row in range(1, max(sheet.max_row, data_row) + extra + 1):
-        if data_row <= output_row < data_row + len(records):
-            source_row = data_row
-            record = dict(records[output_row - data_row], __index__=output_row - data_row + 1)
-        else:
-            source_row = output_row - extra if output_row >= data_row + len(records) else output_row
-            record = None
-        cells = []
-        for col in range(1, max_column + 1):
-            if (output_row, col) in skipped:
-                continue
-            cell = sheet.cell(source_row, col)
-            value = record.get(mapping[col], "") if record is not None and col in mapping else cell.value
-            text = html.escape(str(value if value is not None else "")).replace("\n", "<br>")
-            rowspan, colspan = spans.get((output_row, col), (1, 1))
-            attrs = (f' rowspan="{rowspan}"' if rowspan > 1 else "") + (f' colspan="{colspan}"' if colspan > 1 else "")
-            cells.append(f'<td{attrs} style="{_cell_css(cell)}">{text}</td>')
-        height = sheet.row_dimensions[source_row].height
-        style = f' style="height:{height}pt"' if height else ""
-        rows_html.append(f'<tr{style}>{"".join(cells)}</tr>')
-
-    landscape = sheet.page_setup.orientation == "landscape"
-    orientation = "landscape" if landscape else "portrait"
-    return (f'<!doctype html><html><head><meta charset="utf-8"><style>'
-            f'@page{{size:A4 {orientation};margin:10mm}}body{{font-family:"Microsoft YaHei",Arial,sans-serif}}'
-            f'table{{border-collapse:collapse;width:100%;table-layout:fixed}}tr{{break-inside:avoid}}'
-            f'</style></head><body><table><colgroup>{"".join(widths)}</colgroup>'
-            f'{"".join(rows_html)}</table></body></html>')
-
-
-def render_trim_pdf(context, template_path: Path, tables: list, destination: Path,
-                    shared_fields: dict | None = None) -> dict:
+def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
+                     shared_fields: dict | None = None) -> dict:
+    """Fill the first template sheet and save a separate, editable workbook."""
     from openpyxl import load_workbook
 
     records = _records(tables, shared_fields)
     if not records:
         raise ValueError("OA 打印页的辅料信息表没有可转换的数据。")
-    workbook = load_workbook(template_path, data_only=True)
+    workbook = load_workbook(template_path)
+    temporary = destination.with_suffix(".tmp.xlsx")
     try:
         sheet = workbook.worksheets[0]
         header_row, mapping = _match_columns(sheet, records)
-        content = _render_html(sheet, records, header_row, mapping)
-        landscape = sheet.page_setup.orientation == "landscape"
-        sheet_name = sheet.title
+        data_row = header_row + 1
+        if any(r.min_row <= data_row <= r.max_row for r in sheet.merged_cells.ranges):
+            raise ValueError("模板数据起始行包含合并单元格，无法安全自动填充。")
+        if any(sheet.cell(data_row, col).value not in (None, "") for col in range(1, sheet.max_column + 1)):
+            raise ValueError("模板表头下一行已有数据，请提供空白数据行作为填充位置。")
+
+        # Reuse blank template rows; insert only if records would overwrite a footer.
+        end_row = data_row + len(records) - 1
+        occupied = [cell.row for row in sheet.iter_rows(min_row=data_row + 1, max_row=max(sheet.max_row, data_row))
+                    for cell in row if cell.value is not None]
+        occupied += [r.min_row for r in sheet.merged_cells.ranges if r.min_row > data_row]
+        footer_row = min(occupied, default=end_row + 1)
+        extra = max(0, end_row - footer_row + 1)
+        if extra:
+            # openpyxl does not update dependent formula references on row insertion.
+            if any(cell.data_type == "f" for tab in workbook for row in tab for cell in row):
+                raise ValueError("模板含公式且空白数据行不足，请在模板中预留更多空白行后重试。")
+            merges = [copy(r) for r in sheet.merged_cells.ranges if r.min_row >= footer_row]
+            for merged in merges:
+                sheet.unmerge_cells(str(merged))
+            dimensions = {index: copy(dim) for index, dim in sheet.row_dimensions.items() if index >= footer_row}
+            for index in dimensions:
+                del sheet.row_dimensions[index]
+            sheet.insert_rows(footer_row, extra)
+            for index, dim in dimensions.items():
+                dim.index = index + extra
+                sheet.row_dimensions[index + extra] = dim
+            for merged in merges:
+                merged.shift(row_shift=extra)
+                sheet.merge_cells(str(merged))
+
+        styles = {col: copy(sheet.cell(data_row, col)._style) for col in range(1, sheet.max_column + 1)}
+        height = sheet.row_dimensions[data_row].height
+        for offset, record in enumerate(records):
+            row = data_row + offset
+            if height is not None:
+                sheet.row_dimensions[row].height = height
+            for col, style in styles.items():
+                sheet.cell(row, col)._style = copy(style)
+            for col, field in mapping.items():
+                cell = sheet.cell(row, col)
+                value = offset + 1 if field == "__index__" else record.get(field, "")
+                cell.value = value
+                if isinstance(value, str):
+                    # OA values are text, including codes with leading zeros or '='.
+                    cell.data_type = "s"
+        workbook.save(temporary)
+        os.replace(temporary, destination)
+        return {"rows": len(records), "columns": len(mapping), "sheet": sheet.title}
     finally:
         workbook.close()
-
-    pdf_page = context.new_page()
-    temporary = destination.with_suffix(".tmp.pdf")
-    try:
-        pdf_page.set_content(content, wait_until="domcontentloaded")
-        pdf_page.pdf(path=str(temporary), format="A4", landscape=landscape,
-                     prefer_css_page_size=True, print_background=True)
-        os.replace(temporary, destination)
-    finally:
-        pdf_page.close()
         if temporary.exists():
             temporary.unlink()
-    return {"rows": len(records), "columns": len(mapping), "sheet": sheet_name}
