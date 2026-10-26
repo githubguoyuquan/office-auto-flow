@@ -14,7 +14,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, List
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 
 APP_NAME = "oa-login-cli"
@@ -557,7 +557,12 @@ class AutomationController:
                 raise RuntimeError("查询结果缺少唯一编号或发生变化，已停止以避免重复打印。")
             self.check_cancelled()
             self.update("reading", f"正在打开第 {len(printed)+1} 份工艺单（{style_code}，次数 {row['seq']}）…")
-            page.locator(f'#tb_user input[name="parentItem"][data-index="{row_index}"]').check()
+            radio = page.locator(f'.fixed-table-body-columns input[name="parentItem"][data-index="{row_index}"]')
+            if not radio.count() or not radio.first.is_visible():
+                radio = page.locator(f'#tb_user input[name="parentItem"][data-index="{row_index}"]')
+            radio.first.check(timeout=15_000)
+            if not radio.first.is_checked():
+                raise RuntimeError(f"第 {row_index + 1} 行未被选中，已停止打印。")
             page.locator('#processSheetPrint').click(timeout=15_000)
             modal = page.locator('#printModel')
             modal.wait_for(state="visible", timeout=15_000)
@@ -569,6 +574,9 @@ class AutomationController:
                 raise RuntimeError("OA 未完成全部打印项勾选，已停止。")
             modal.locator('button.btn_tOPrint').click()
             page.wait_for_url("**/printAll.html?**", wait_until="domcontentloaded", timeout=60_000)
+            actual_id = parse_qs(urlparse(page.url).query).get("bomtitleid", [None])[0]
+            if actual_id != key:
+                raise RuntimeError(f"打开的工艺单与所选行不一致（预期 {key}，实际 {actual_id}）。")
             seen.add(key)
             printed.append(f"{style_code} / 次数 {row['seq']}：{page.url}")
             row_index += 1
