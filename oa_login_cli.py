@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import secrets
+import subprocess
 import sys
 import threading
 import time
@@ -29,6 +30,7 @@ MAX_OUTPUT_LINES = 120
 MAX_BODY_BYTES = 32_768
 MAX_TEMPLATE_BYTES = 5 * 1024 * 1024
 CONFIG_LOCK = threading.Lock()
+DIRECTORY_PICKER_LOCK = threading.Lock()
 
 
 def configure_console() -> None:
@@ -125,6 +127,48 @@ def output_directory(value: str) -> Path:
     if not path.is_dir() or not os.access(path, os.W_OK):
         raise ValueError(f"保存目录不可写：{path}")
     return path
+
+
+def choose_directory(initial: str) -> str:
+    if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
+        raise ValueError("文件夹选择窗口已打开，请先完成选择。")
+    try:
+        start = Path(initial).expanduser() if initial else Path.home()
+        if not start.is_dir():
+            start = Path.home()
+        if sys.platform == "darwin":
+            script = '''on run argv
+                try
+                    activate
+                    return POSIX path of (choose folder with prompt "选择 PDF 保存目录" default location (POSIX file (item 1 of argv)))
+                on error number -128
+                    return ""
+                end try
+            end run'''
+            command = ["osascript", "-e", script, str(start)]
+            environment = None
+        elif sys.platform == "win32":
+            script = '''[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+                Add-Type -AssemblyName System.Windows.Forms
+                $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+                $dialog.Description = 'Select PDF output folder'
+                $dialog.SelectedPath = $env:AIOA_PICKER_INITIAL
+                $dialog.ShowNewFolderButton = $true
+                try {
+                    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                        [Console]::Write($dialog.SelectedPath)
+                    }
+                } finally { $dialog.Dispose() }'''
+            command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
+            environment = dict(os.environ, AIOA_PICKER_INITIAL=str(start))
+        else:
+            raise ValueError("文件夹选择目前支持 Windows 和 macOS。")
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", env=environment)
+        if result.returncode:
+            raise ValueError("无法打开系统文件夹选择窗口，请重试。")
+        return result.stdout.strip()
+    finally:
+        DIRECTORY_PICKER_LOCK.release()
 
 
 def remember_directory(settings: dict, field: str, value: str) -> None:
@@ -907,10 +951,15 @@ PAGE_HTML = r'''<!doctype html>
     html[data-theme="dark"] .login-card,html[data-theme="dark"] .result pre{background:#272727;border-color:#424242;color:#ddd}
     html[data-theme="dark"] .field{background:#212121;border-color:#505050;color:#eee}html[data-theme="dark"] .field:focus,html[data-theme="dark"] .search:focus{border-color:#999;box-shadow:0 0 0 3px #ffffff12}
     html[data-theme="dark"] .run-actions{background:#303030;border-color:#424242;box-shadow:none}
-    #printFields{display:grid;gap:8px;margin-top:20px}
-    #printFields .field-label{margin-top:8px}
-    #printFields .field{width:100%}
-    #printFields input[type=file]{padding:9px}
+    #printFields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 20px;margin-top:20px}
+    #printFields .print-config{min-width:0}
+    #printFields .field-label{display:block;margin:0 0 8px}
+    #printFields .field{width:100%;min-width:0}
+    #printFields .picker-row{display:flex;gap:8px;align-items:center}
+    #printFields .picker-row .field{flex:1}
+    #printFields .picker-row button{flex-shrink:0;white-space:nowrap}
+    #printFields .panel-sub{grid-column:1/-1;margin:0}
+    @media(max-width:680px){#printFields{grid-template-columns:1fr}}
     #printFields:not([hidden]) + .run-actions{position:static;margin-top:22px}
     html[data-theme="dark"] .primary{background:#ececec;color:#222}html[data-theme="dark"] .primary:hover:not(:disabled){background:#fff}
     html[data-theme="dark"] .ghost{background:transparent;color:#ddd;border-color:#555}html[data-theme="dark"] .ghost:hover:not(:disabled){background:#3a3a3a}
@@ -989,12 +1038,17 @@ PAGE_HTML = r'''<!doctype html>
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   const $ = id => document.getElementById(id);
   const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
-  printFields.innerHTML=`<label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B">
-    <label class="field-label" for="originalDir">完整工艺单 PDF 保存目录</label><input class="field" id="originalDir" list="originalHistory" placeholder="填写绝对路径；点击输入框选择历史目录"><datalist id="originalHistory"></datalist>
-    <label class="field-label" for="convertedDir">辅料转换 PDF 保存目录</label><input class="field" id="convertedDir" list="convertedHistory" placeholder="填写绝对路径；点击输入框选择历史目录"><datalist id="convertedHistory"></datalist>
-    <label class="field-label" for="templateHistory">辅料格式模板（XLSX）</label><select class="field" id="templateHistory"></select><input class="field" id="templateFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet">
+  printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"></div>
+    <div class="print-config"><label class="field-label" for="templateHistory">辅料格式模板（XLSX）</label><div class="picker-row"><select class="field" id="templateHistory"></select><button type="button" class="ghost" id="uploadTemplate">上传模板</button></div><input id="templateFile" type="file" hidden accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
+    <div class="print-config"><label class="field-label" for="originalDir">完整工艺单 PDF 保存目录</label><div class="picker-row"><input class="field" id="originalDir" list="originalHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseOriginalDir">选择文件夹</button></div><datalist id="originalHistory"></datalist></div>
+    <div class="print-config"><label class="field-label" for="convertedDir">辅料转换 PDF 保存目录</label><div class="picker-row"><input class="field" id="convertedDir" list="convertedHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseConvertedDir">选择文件夹</button></div><datalist id="convertedHistory"></datalist></div>
     <p class="panel-sub">默认使用上次的目录和模板；可从历史目录或模板列表中切换。</p>`;
   document.querySelector('.run-actions').before(printFields);
+  let choosingDirectory=false;
+  $('uploadTemplate').addEventListener('click',()=>$('templateFile').click());
+  for(const [buttonId,fieldId] of [['chooseOriginalDir','originalDir'],['chooseConvertedDir','convertedDir']]){
+    $(buttonId).addEventListener('click',async()=>{if(choosingDirectory)return;choosingDirectory=true;$(buttonId).textContent='选择中…';renderTask();try{const data=await api('/api/choose-directory','POST',{initial:$(fieldId).value});if(data.path)$(fieldId).value=data.path}catch(error){toast(error.message)}finally{choosingDirectory=false;$(buttonId).textContent='选择文件夹';renderTask()}});
+  }
   function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.hostname==='noah.vgrass.com'&&u.pathname.endsWith('/plm/styleManage/newStyleManage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
@@ -1021,7 +1075,8 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
-    $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','originalDir','convertedDir','templateHistory','templateFile'])$(id).disabled=runningPhases.has(currentTask.phase);
+    $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
+    for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
     const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=isPrintOperation(chosen)?'验证登录 · 查询款号 · 逐行打开全部打印项':'打开业务页面 · 验证登录 · 读取内容';$('composerCopy').append(hint);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
@@ -1108,7 +1163,9 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
-            if self.path == "/api/print-settings":
+            if self.path == "/api/choose-directory":
+                self._send(200, {"path": choose_directory(str(body.get("initial", "")))})
+            elif self.path == "/api/print-settings":
                 with CONFIG_LOCK:
                     settings = load_print_settings()
                     remember_directory(settings, "original_dir", str(body.get("original_dir", "")))
