@@ -328,8 +328,11 @@ class AutomationController:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.messages = queue.Queue()
+        self.jobs = queue.Queue()
         self.cancel_event = threading.Event()
+        self.shutdown_event = threading.Event()
         self.worker = None
+        self.task_active = False
         self.state = {
             "phase": "idle",
             "message": "选择业务操作，开始连接 OA 页面。",
@@ -355,10 +358,11 @@ class AutomationController:
 
     def start(self, operation: dict) -> None:
         with self.lock:
-            if self.worker and self.worker.is_alive():
+            if self.task_active:
                 raise ValueError("已有任务正在运行，请先等待或停止。")
             self.messages = queue.Queue()
             self.cancel_event.clear()
+            self.task_active = True
             self.state = {
                 "phase": "opening",
                 "message": "正在打开业务页面…",
@@ -368,10 +372,10 @@ class AutomationController:
                 "content": "",
                 "updated_at": datetime.now().strftime("%H:%M:%S"),
             }
-            self.worker = threading.Thread(
-                target=self._run, args=(dict(operation),), daemon=True
-            )
-            self.worker.start()
+            if not self.worker or not self.worker.is_alive():
+                self.worker = threading.Thread(target=self._worker_loop, daemon=True)
+                self.worker.start()
+            self.jobs.put(dict(operation))
 
     def submit_credentials(self, username: str, password: str) -> None:
         with self.lock:
@@ -384,7 +388,7 @@ class AutomationController:
 
     def stop(self) -> None:
         with self.lock:
-            if not self.worker or not self.worker.is_alive():
+            if not self.task_active:
                 raise ValueError("当前没有运行中的任务。")
             self.cancel_event.set()
         self.messages.put(("cancel",))
@@ -589,73 +593,100 @@ class AutomationController:
                 return result
             remaining[0].wait_for_timeout(250)
 
-    def _run(self, operation: dict) -> None:
+    def _worker_loop(self) -> None:
         context = None
-        final_phase = "error"
-        final_message = "任务中断。"
-        result = {}
         try:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
-                context = launch_context(playwright)
-                context.add_init_script(LOGIN_SUBMIT_GUARD)
-                install_noah_login_compatibility(context)
-                def log_navigation(tab: Any) -> None:
-                    def on_navigation(frame: Any) -> None:
-                        if frame == tab.main_frame:
-                            print(f"OA 浏览器进入：{urlparse(frame.url).path}")
-                    tab.on("framenavigated", on_navigation)
+                while not self.shutdown_event.is_set():
+                    try:
+                        operation = self.jobs.get(timeout=0.5)
+                    except queue.Empty:
+                        continue
+                    try:
+                        if context is None:
+                            context = launch_context(playwright)
+                            context.add_init_script(LOGIN_SUBMIT_GUARD)
+                            install_noah_login_compatibility(context)
+                            def log_navigation(tab: Any) -> None:
+                                def on_navigation(frame: Any) -> None:
+                                    if frame == tab.main_frame:
+                                        print(f"OA 浏览器进入：{urlparse(frame.url).path}")
+                                tab.on("framenavigated", on_navigation)
 
-                context.on("page", log_navigation)
-                for existing_tab in context.pages:
-                    log_navigation(existing_tab)
-                page = context.pages[0] if context.pages else context.new_page()
-                open_business_page(page, operation)
-                page.wait_for_timeout(1_800)
-                self.check_cancelled()
-
-                # A login page may redirect immediately when a session already exists.
-                # Preserve that landing page instead of navigating back to login.
-                if self._on_login_page(page, operation):
-                    self._wait_for_login(page, operation)
-                    if not same_page(page.url, operation["url"]):
-                        self.update("opening", "登录完成，正在打开目标业务页面…")
-                        open_business_page(page, operation)
-                        page.wait_for_timeout(1_200)
-                    self.check_cancelled()
-                    if self._on_login_page(page, operation):
-                        raise RuntimeError("返回业务页面后仍显示登录表单，请检查账号或登录状态。")
-
-                if not same_page(page.url, operation["url"]):
-                    raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
-
-                if dismiss_initial_password_modal(page):
-                    self.update("opening", "已关闭修改初始密码提示。")
-                if is_process_sheet(operation):
-                    result = self._print_process_sheets(context, page, operation)
-                    final_phase = "done"
-                    final_message = "工艺单打印流程已结束（实际打印结果请以浏览器或打印机为准）。"
-                    return
-                self.update("reading", "正在读取业务页面主要内容…")
-                result = {
-                    "title": page.title(),
-                    "url": page.url,
-                    "content": main_page_text(page) or "页面没有可读取的文本内容。",
-                }
-                final_phase = "done"
-                final_message = "业务页面已打开，主要内容已读取。"
-        except Cancelled:
-            final_phase = "cancelled"
-            final_message = "任务已停止。"
+                            context.on("page", log_navigation)
+                            for existing_tab in context.pages:
+                                log_navigation(existing_tab)
+                        self._run(operation, context)
+                    except Exception as error:
+                        self.update("error", f"执行失败：{error}")
+                        if context is not None:
+                            try:
+                                context.close()
+                            except Exception:
+                                pass
+                            context = None
+                    finally:
+                        with self.lock:
+                            self.task_active = False
         except Exception as error:
-            final_message = f"执行失败：{error}"
+            self.update("error", f"浏览器服务启动失败：{error}")
+            with self.lock:
+                self.task_active = False
         finally:
             if context is not None:
                 try:
                     context.close()
                 except Exception:
                     pass
+
+    def _run(self, operation: dict, context: Any) -> None:
+        final_phase = "error"
+        final_message = "任务中断。"
+        result = {}
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            open_business_page(page, operation)
+            page.wait_for_timeout(1_800)
+            self.check_cancelled()
+
+            # A login page may redirect immediately when a session already exists.
+            # Preserve that landing page instead of navigating back to login.
+            if self._on_login_page(page, operation):
+                self._wait_for_login(page, operation)
+                if not same_page(page.url, operation["url"]):
+                    self.update("opening", "登录完成，正在打开目标业务页面…")
+                    open_business_page(page, operation)
+                    page.wait_for_timeout(1_200)
+                self.check_cancelled()
+                if self._on_login_page(page, operation):
+                    raise RuntimeError("返回业务页面后仍显示登录表单，请检查账号或登录状态。")
+
+            if not same_page(page.url, operation["url"]):
+                raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
+
+            if dismiss_initial_password_modal(page):
+                self.update("opening", "已关闭修改初始密码提示。")
+            if is_process_sheet(operation):
+                result = self._print_process_sheets(context, page, operation)
+                final_phase = "done"
+                final_message = "工艺单打印流程已结束（实际打印结果请以浏览器或打印机为准）。"
+                return
+            self.update("reading", "正在读取业务页面主要内容…")
+            result = {
+                "title": page.title(),
+                "url": page.url,
+                "content": main_page_text(page) or "页面没有可读取的文本内容。",
+            }
+            final_phase = "done"
+            final_message = "业务页面已打开，主要内容已读取。"
+        except Cancelled:
+            final_phase = "cancelled"
+            final_message = "任务已停止。"
+        except Exception as error:
+            final_message = f"执行失败：{error}"
+        finally:
             self.update(final_phase, final_message, **result)
 
 
@@ -1016,6 +1047,7 @@ def run() -> int:
         pass
     finally:
         CONTROLLER.cancel_event.set()
+        CONTROLLER.shutdown_event.set()
         server.server_close()
     return 0
 
