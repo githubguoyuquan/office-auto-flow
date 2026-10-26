@@ -796,7 +796,12 @@ class AutomationController:
                 converted_pdf = converted_dir / f"{saved_pdf.stem}_辅料信息_{version}.pdf"
                 version += 1
             try:
-                conversion = render_trim_pdf(context, template_path, trim_tables, converted_pdf)
+                official_style = page.evaluate("""() =>
+                  document.querySelector('#app')?.__vue__?.bomTitle?.style_code || ''""")
+                conversion = render_trim_pdf(
+                    context, template_path, trim_tables, converted_pdf,
+                    shared_fields={"正式款号": str(official_style or row["style"]).strip()},
+                )
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             seen.add(key)

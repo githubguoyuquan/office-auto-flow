@@ -15,7 +15,8 @@ def _key(value: object) -> str:
     return re.sub(r"[^\w]", "", normalized)
 
 
-def _records(tables: list) -> list[dict]:
+def _records(tables: list, shared_fields: dict | None = None) -> list[dict]:
+    """Transpose each source material column to a row, then add sheet-wide fields."""
     records = []
     for table in tables:
         width = max((len(row) - 1 for row in table), default=0)
@@ -25,6 +26,7 @@ def _records(tables: list) -> list[dict]:
                 if row and len(row) > index + 1 and str(row[0]).strip():
                     record[str(row[0]).strip()] = str(row[index + 1]).strip()
             if any(record.values()):
+                record.update(shared_fields or {})
                 records.append(record)
     return records
 
@@ -32,6 +34,10 @@ def _records(tables: list) -> list[dict]:
 def _match_columns(sheet, records: list[dict]) -> tuple[int, dict[int, str]]:
     names = list(dict.fromkeys(name for record in records for name in record))
     normalized = {_key(name): name for name in names if _key(name)}
+    if "正式款号" in names:
+        for alias in ("款号", "Style#", "Style No", "Style Number", "Official Style Code",
+                      "正式款号 Style#", "正式款号 Style No"):
+            normalized.setdefault(_key(alias), "正式款号")
     best_row, best_map = 0, {}
     for row in sheet.iter_rows(min_row=1, max_row=min(sheet.max_row, 40)):
         mapping = {}
@@ -154,10 +160,11 @@ def _render_html(sheet, records: list[dict], header_row: int, mapping: dict[int,
             f'{"".join(rows_html)}</table></body></html>')
 
 
-def render_trim_pdf(context, template_path: Path, tables: list, destination: Path) -> dict:
+def render_trim_pdf(context, template_path: Path, tables: list, destination: Path,
+                    shared_fields: dict | None = None) -> dict:
     from openpyxl import load_workbook
 
-    records = _records(tables)
+    records = _records(tables, shared_fields)
     if not records:
         raise ValueError("OA 打印页的辅料信息表没有可转换的数据。")
     workbook = load_workbook(template_path, data_only=True)
