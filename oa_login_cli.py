@@ -204,7 +204,8 @@ def store_template(filename: str, encoded: str) -> dict:
 
 
 def business_operations(settings: dict) -> List[dict]:
-    return [{"name": item["name"], "url": item["url"]} for item in load_operations()
+    return [{"name": item["name"], "url": item["url"],
+             "description": item.get("description", "")} for item in load_operations()
             if not urlparse(item["url"]).path.lower().endswith("/login.html")
             and not (settings["login_url"] and same_page(item["url"], settings["login_url"]))]
 
@@ -542,6 +543,8 @@ class AutomationController:
         self.task_active = False
         self.state = {
             "phase": "idle",
+            "step": "open",
+            "login_encountered": False,
             "message": "选择业务操作，开始连接 OA 页面。",
             "operation": "",
             "title": "",
@@ -556,6 +559,9 @@ class AutomationController:
 
     def update(self, phase: str, message: str, **values: Any) -> None:
         with self.lock:
+            if phase in {"login_required", "authenticating"}:
+                values["login_encountered"] = True
+                values["step"] = "login"
             self.state.update(
                 phase=phase,
                 message=message,
@@ -572,6 +578,8 @@ class AutomationController:
             self.task_active = True
             self.state = {
                 "phase": "opening",
+                "step": "open",
+                "login_encountered": False,
                 "message": "正在打开业务页面…",
                 "operation": operation["name"],
                 "title": "",
@@ -685,7 +693,7 @@ class AutomationController:
                     raise RuntimeError("业务页反复跳转登录，请检查该账号的业务权限或会话状态。")
                 self._wait_for_login(page, operation)
                 self.check_cancelled()
-                self.update("opening", "登录完成，正在继续工艺单打印…")
+                self.update("opening", "登录完成，正在继续工艺单打印…", step="open")
                 if not same_page(page.url, operation["url"]):
                     open_business_page(page, operation)
                 recoveries += 1
@@ -693,7 +701,7 @@ class AutomationController:
             elif not same_page(page.url, operation["url"]):
                 if recoveries >= 2:
                     raise RuntimeError(f"无法进入工艺单列表，当前页面：{page.url}")
-                self.update("opening", "正在从当前页面返回工艺单列表…")
+                self.update("opening", "正在从当前页面返回工艺单列表…", step="open")
                 open_business_page(page, operation)
                 recoveries += 1
             else:
@@ -717,8 +725,9 @@ class AutomationController:
         page_number, row_index = 1, 0
         while True:
             self.check_cancelled()
-            self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…")
+            self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…", step="query")
             self._wait_for_process_sheet(page, operation)
+            self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…", step="query")
             page.locator('input[name="styleCode"].searchMatnr').fill(style_code)
             # The click can issue two table requests; the first load event may
             # belong to stale rows. Match this query and its rendered row IDs.
@@ -763,7 +772,7 @@ class AutomationController:
             if not row["id"] or key in seen:
                 raise RuntimeError("查询结果缺少唯一编号或发生变化，已停止以避免重复打印。")
             self.check_cancelled()
-            self.update("reading", f"正在打开第 {len(printed)+1} 份工艺单（{style_code}，次数 {row['seq']}）…")
+            self.update("reading", f"正在打开第 {len(printed)+1} 份工艺单（{style_code}，次数 {row['seq']}）…", step="select")
             radio = page.locator(f'.fixed-table-body-columns input[name="parentItem"][data-index="{row_index}"]')
             if not radio.count() or not radio.first.is_visible():
                 radio = page.locator(f'#tb_user input[name="parentItem"][data-index="{row_index}"]')
@@ -784,9 +793,9 @@ class AutomationController:
             actual_id = parse_qs(urlparse(page.url).query).get("bomtitleid", [None])[0]
             if actual_id != key:
                 raise RuntimeError(f"打开的工艺单与所选行不一致（预期 {key}，实际 {actual_id}）。")
-            self.update("reading", f"正在保存第 {len(printed)+1} 份完整工艺单 PDF…")
+            self.update("reading", f"正在保存第 {len(printed)+1} 份完整工艺单 PDF…", step="save_pdf")
             saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
-            self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 XLSX…")
+            self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 XLSX…", step="convert")
             template_id = operation["print_settings"]["template_id"]
             template_path = data_dir() / "templates" / f"{template_id}.xlsx"
             converted_dir = output_directory(operation["print_settings"]["converted_dir"])
@@ -808,6 +817,7 @@ class AutomationController:
             printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
             row_index += 1
             # Keep each native print page alive; use another tab for the next row.
+            self.update("opening", "正在打开下一份工艺单列表…", step="open")
             page = context.new_page()
             open_business_page(page, operation)
         page.close()
@@ -872,7 +882,7 @@ class AutomationController:
             if self._on_login_page(page, operation):
                 self._wait_for_login(page, operation)
                 if not same_page(page.url, operation["url"]):
-                    self.update("opening", "登录完成，正在打开目标业务页面…")
+                    self.update("opening", "登录完成，正在打开目标业务页面…", step="open")
                     open_business_page(page, operation)
                     page.wait_for_timeout(1_200)
                 self.check_cancelled()
@@ -889,7 +899,7 @@ class AutomationController:
                 final_phase = "done"
                 final_message = "完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
                 return
-            self.update("reading", "正在读取业务页面主要内容…")
+            self.update("reading", "正在读取业务页面主要内容…", step="read")
             result = {
                 "title": page.title(),
                 "url": page.url,
@@ -986,6 +996,8 @@ PAGE_HTML = r'''<!doctype html>
     #printFields .panel-sub{grid-column:1/-1;margin:0}
     @media(max-width:680px){#printFields{grid-template-columns:1fr}}
     #printFields:not([hidden]) + .run-actions{position:static;margin-top:22px}
+    .content{padding-top:22px}.page-title{margin:0;text-align:left;font-size:26px;line-height:1.3}.page-desc{margin:6px 0 22px;text-align:left;line-height:1.5}.run-head{padding-bottom:16px}.timeline{margin-bottom:18px;flex-wrap:wrap;row-gap:12px}.step-line{min-width:8px;margin:0 8px}
+    @media(max-width:560px){.content{padding-top:18px}.page-title{font-size:23px}.page-desc{margin-bottom:18px}.step-label{white-space:normal}}
     html[data-theme="dark"] .primary{background:#ececec;color:#222}html[data-theme="dark"] .primary:hover:not(:disabled){background:#fff}
     html[data-theme="dark"] .ghost{background:transparent;color:#ddd;border-color:#555}html[data-theme="dark"] .ghost:hover:not(:disabled){background:#3a3a3a}
     html[data-theme="dark"] .modal{background:#292929;color:#eee}html[data-theme="dark"] .modal-backdrop{background:#0009}html[data-theme="dark"] .toast{background:#eee;color:#222}
@@ -1026,7 +1038,7 @@ PAGE_HTML = r'''<!doctype html>
         <section class="panel" aria-label="运行任务">
           <div class="panel-heading run-head"><div><p class="section-kicker">TASK EXECUTION</p><h3>运行任务</h3><div class="panel-sub">执行过程和页面结果实时更新</div></div><span class="status-badge" id="statusBadge">待开始</span></div>
           <div class="run-body">
-            <div class="timeline"><div class="step active" id="step1"><span class="step-num">1</span><span class="step-label">选择业务</span></div><div class="step-line"></div><div class="step" id="step2"><span class="step-num">2</span><span class="step-label">验证登录</span></div><div class="step-line"></div><div class="step" id="step3"><span class="step-num">3</span><span class="step-label">读取页面</span></div></div>
+            <div class="timeline" id="taskTimeline" aria-label="任务步骤"></div>
             <div class="status-card"><div class="status-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg></div><div><div class="status-title" id="statusTitle">准备就绪</div><div class="status-message" id="statusMessage">选择左侧业务操作后，即可开始。</div></div></div>
             <div class="login-card" id="loginCard" hidden><h4>完成 OA 登录</h4><p>在这里填写账号密码后，工具会将其填入 OA 页面。验证码请在 OA 浏览器中输入，再点击页面上的“登录”。</p><form id="loginForm"><div class="login-grid"><div><label class="field-label" for="username">用户名</label><input class="field" id="username" autocomplete="username" required></div><div><label class="field-label" for="password">密码</label><input class="field" id="password" type="password" autocomplete="current-password" required></div></div><button class="primary login-submit" type="submit" id="loginButton">填入 OA 页面</button></form></div>
             <div class="run-actions"><button class="primary" id="runButton" disabled>开始运行</button><button class="ghost" id="stopButton" hidden>停止任务</button></div>
@@ -1039,15 +1051,15 @@ PAGE_HTML = r'''<!doctype html>
     </main>
   </div>
 </div>
-<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写业务名称和页面地址，登录地址统一在系统设置中配置。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
+<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写业务名称、描述和页面地址，登录地址统一在系统设置中配置。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationDescription">业务描述</label><textarea class="field" id="operationDescription" maxlength="200" rows="2" placeholder="简要说明任务会执行什么操作"></textarea><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
 <div class="toast" id="toast" role="status"></div>
 <script>
   const businessPanel = document.querySelector('[aria-label="业务操作"]');
   const sidebar = document.querySelector('.sidebar');
   sidebar.insertBefore(businessPanel, document.querySelector('.side-bottom'));
   document.querySelector('.hero').remove();
-  document.querySelector('.page-title').textContent = '今天，处理什么业务？';
-  document.querySelector('.page-desc').textContent = '选择一个业务入口，开始你的自动化任务。';
+  document.querySelector('.page-title').textContent = '选择业务操作';
+  document.querySelector('.page-desc').textContent = '选择左侧业务，查看任务内容并开始运行。';
   document.querySelector('.crumb').innerHTML = '<b>AIOA</b> <span style="font-size:12px;color:#aaa;margin-left:8px">工作台</span>';
   const menuButton = document.createElement('button');
   menuButton.className = 'sidebar-toggle'; menuButton.textContent = '☰'; menuButton.setAttribute('aria-label','展开或收起业务列表');
@@ -1092,6 +1104,16 @@ PAGE_HTML = r'''<!doctype html>
   function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('show'),3600)}
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
+  function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
+  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;return /^[A-Za-z0-9_-]{1,80}$/.test($('styleCode').value.trim())&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
+  function renderTimeline(item){
+    const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','选择并打印'],['save_pdf','保存完整 PDF'],['convert','生成辅料 XLSX']]:[['open','打开业务页'],['read','读取页面内容']];
+    const progress=item?.name===currentTask.operation?currentTask:{phase:'idle',step:'open',login_encountered:false};
+    if(progress.login_encountered)steps.splice(1,0,['login','完成登录']);
+    const index=Math.max(0,steps.findIndex(([key])=>key===(progress.step||'open')));
+    const timeline=$('taskTimeline');timeline.replaceChildren();
+    steps.forEach(([key,label],position)=>{if(position){const line=document.createElement('div');line.className='step-line';timeline.append(line)}const node=document.createElement('div');node.className='step'+(progress.phase==='done'||position<index?' complete':position===index?' active':'');node.dataset.step=key;const num=document.createElement('span');num.className='step-num';num.textContent=String(position+1);const title=document.createElement('span');title.className='step-label';title.textContent=label;node.append(num,title);timeline.append(node)});
+  }
   function renderOperations(){
     const list=$('operationList');list.replaceChildren();const query=$('searchInput').value.trim().toLocaleLowerCase();const filtered=operations.filter(item=>(item.name+' '+item.url+' '+(item.login_url||'')).toLocaleLowerCase().includes(query));
     if(!filtered.length){const wrap=document.createElement('div');wrap.className='empty';wrap.innerHTML='<div class="empty-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 10h8M8 14h6"/></svg></div><h4>'+(operations.length?'没有找到匹配的业务':'还没有业务操作')+'</h4><p>'+(operations.length?'试试其他名称或地址':'点击右上角「新增业务」开始配置')+'</p>';list.append(wrap)}
@@ -1102,18 +1124,20 @@ PAGE_HTML = r'''<!doctype html>
   function renderTask(){
     $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
     for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
-    const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=isPrintOperation(chosen)?'验证登录 · 查询款号 · 逐行打开全部打印项':'打开业务页面 · 验证登录 · 读取内容';$('composerCopy').append(hint);
+    const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=businessDescription(chosen);$('composerCopy').append(hint);
+    document.querySelector('.page-title').textContent=chosen?chosen.name:'选择业务操作';document.querySelector('.page-desc').textContent=businessDescription(chosen);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
-    $('runButton').disabled=!selected()||active;$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
-    let step=phase==='idle'?1:phase==='opening'?1:['login_required','authenticating'].includes(phase)?2:3;for(let i=1;i<=3;i++){const node=$('step'+i);node.className='step'+(i<step?' complete':i===step?' active':'')}
+    $('runButton').disabled=!canRun(chosen);$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
+    renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=phase==='done'&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
   async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
-  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
+  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationDescription').value=item?item.description||'':'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
   function closeModal(){$('modalBackdrop').classList.remove('open');editingName=''}
   $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
-  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
+  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),description=$('operationDescription').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,description,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
+  for(const id of ['styleCode','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,renderTask)}
   $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!style_code){toast('请输入工艺单款号');$('styleCode').focus();return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});await api('/api/run','POST',{name:item.name,style_code});await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
@@ -1220,11 +1244,14 @@ class LocalHandler(BaseHTTPRequestHandler):
                 self._send(200, {"ok": True})
             elif self.path == "/api/operations":
                 name = str(body.get("name", "")).strip()
+                description = str(body.get("description", "")).strip()
                 old_name = str(body.get("old_name", "")).strip()
                 if not name or len(name) > 60:
                     raise ValueError("业务名称须为 1–60 个字符。")
+                if len(description) > 200:
+                    raise ValueError("业务描述不能超过 200 个字符。")
                 url = normalize_url(str(body.get("url", "")))
-                operation = {"name": name, "url": url}
+                operation = {"name": name, "url": url, "description": description}
                 with CONFIG_LOCK:
                     settings = load_settings()
                     if urlparse(url).path.lower().endswith("/login.html") or (settings["login_url"] and same_page(url, settings["login_url"])):
