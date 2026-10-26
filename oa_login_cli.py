@@ -318,6 +318,22 @@ require.config({shim: {
     context.route("**/activiti/js/main.js*", patch_loader)
 
 
+def install_noah_print_compatibility(context: Any) -> None:
+    def patch_print_script(route: Any) -> None:
+        request_url = urlparse(route.request.url)
+        page_url = urlparse(route.request.frame.url)
+        if (request_url.hostname != "noah.vgrass.com"
+                or request_url.path != "/activiti/js/plm/styleManage/printAll.js"
+                or page_url.path != "/activiti/html/plm/styleManage/printAll.html"):
+            route.continue_()
+            return
+        response = route.fetch()
+        source = re.sub(r"(?m)^[ \t]*debugger[ \t]*;?[ \t]*\r?$", "", response.text())
+        route.fulfill(response=response, body=source)
+
+    context.route("**/activiti/js/plm/styleManage/printAll.js*", patch_print_script)
+
+
 class Cancelled(Exception):
     pass
 
@@ -617,6 +633,7 @@ class AutomationController:
                             context = launch_context(playwright)
                             context.add_init_script(LOGIN_SUBMIT_GUARD)
                             install_noah_login_compatibility(context)
+                            install_noah_print_compatibility(context)
                         self._run(operation, context)
                     except Exception as error:
                         self.update("error", f"执行失败：{error}")
