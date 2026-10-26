@@ -187,6 +187,15 @@ def is_process_sheet(operation: dict) -> bool:
     return url.hostname == "noah.vgrass.com" and url.path.endswith("/plm/styleManage/newStyleManage.html")
 
 
+def open_business_page(page: Any, operation: dict) -> None:
+    target = operation["url"]
+    if (urlparse(target).path.lower().endswith("/login.html")
+            or (operation.get("login_url") and same_page(target, operation["login_url"]))):
+        raise ValueError("业务地址指向登录页，已阻止主动跳转。")
+    print(f"AIOA 主动打开业务页：{urlparse(target).path}")
+    page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+
+
 def captcha_visible(page: Any) -> bool:
     for frame in page.frames:
         try:
@@ -467,14 +476,14 @@ class AutomationController:
                 self.check_cancelled()
                 self.update("opening", "登录完成，正在继续工艺单打印…")
                 if not same_page(page.url, operation["url"]):
-                    page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                    open_business_page(page, operation)
                 recoveries += 1
                 deadline = time.monotonic() + 60
             elif not same_page(page.url, operation["url"]):
                 if recoveries >= 2:
                     raise RuntimeError(f"无法进入工艺单列表，当前页面：{page.url}")
                 self.update("opening", "正在从当前页面返回工艺单列表…")
-                page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                open_business_page(page, operation)
                 recoveries += 1
             else:
                 try:
@@ -546,7 +555,7 @@ class AutomationController:
             row_index += 1
             # Keep each native print page alive; use another tab for the next row.
             page = context.new_page()
-            page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+            open_business_page(page, operation)
         page.close()
         if not printed:
             raise RuntimeError(f"没有与款号 {style_code} 完全匹配的工艺单。")
@@ -576,26 +585,33 @@ class AutomationController:
                 context = launch_context(playwright)
                 context.add_init_script(LOGIN_SUBMIT_GUARD)
                 install_noah_login_compatibility(context)
+                def log_navigation(tab: Any) -> None:
+                    def on_navigation(frame: Any) -> None:
+                        if frame == tab.main_frame:
+                            print(f"OA 浏览器进入：{urlparse(frame.url).path}")
+                    tab.on("framenavigated", on_navigation)
+
+                context.on("page", log_navigation)
+                for existing_tab in context.pages:
+                    log_navigation(existing_tab)
                 page = context.pages[0] if context.pages else context.new_page()
-                page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                open_business_page(page, operation)
                 page.wait_for_timeout(1_800)
                 self.check_cancelled()
 
                 # A login page may redirect immediately when a session already exists.
                 # Preserve that landing page instead of navigating back to login.
-                login_was_target = bool(operation.get("test_login"))
                 if self._on_login_page(page, operation):
-                    login_was_target = login_was_target or same_page(page.url, operation["url"])
                     self._wait_for_login(page, operation)
-                    if not login_was_target and not same_page(page.url, operation["url"]):
+                    if not same_page(page.url, operation["url"]):
                         self.update("opening", "登录完成，正在打开目标业务页面…")
-                        page.goto(operation["url"], wait_until="domcontentloaded", timeout=60_000)
+                        open_business_page(page, operation)
                         page.wait_for_timeout(1_200)
                     self.check_cancelled()
                     if self._on_login_page(page, operation):
                         raise RuntimeError("返回业务页面后仍显示登录表单，请检查账号或登录状态。")
 
-                if not login_was_target and not same_page(page.url, operation["url"]):
+                if not same_page(page.url, operation["url"]):
                     raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
 
                 if dismiss_initial_password_modal(page):
@@ -781,14 +797,13 @@ PAGE_HTML = r'''<!doctype html>
   function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.hostname==='noah.vgrass.com'&&u.pathname.endsWith('/plm/styleManage/newStyleManage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
-  settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="button" class="ghost" id="testLogin">测试登录</button><button type="submit" class="primary">保存设置</button></div></form></div>';
+  settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="submit" class="primary">保存设置</button></div></form></div>';
   document.body.append(settingsModal);
   settingsButton.onclick=async()=>{try{const data=await api('/api/state');$('systemLoginUrl').value=data.settings.login_url||'';settingsModal.classList.add('open');$('systemLoginUrl').focus()}catch(error){toast(error.message)}};
   $('closeSettings').onclick=()=>{settingsModal.classList.remove('open');settingsButton.focus()};
   settingsModal.addEventListener('click',event=>{if(event.target===settingsModal)$('closeSettings').click()});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&settingsModal.classList.contains('open'))$('closeSettings').click()});
   $('settingsForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});$('closeSettings').click();await refresh();toast('系统设置已保存')}catch(error){toast(error.message)}};
-  $('testLogin').onclick=async()=>{try{if(!$('settingsForm').reportValidity())return;await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});await api('/api/test-login','POST',{});$('closeSettings').click();await refresh()}catch(error){toast(error.message)}};
   let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false;
   const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping','awaiting_print']);
   const labels = {awaiting_print:'等待打印完成',idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
@@ -896,13 +911,6 @@ class LocalHandler(BaseHTTPRequestHandler):
                     temporary = target.with_suffix(".tmp")
                     temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
                     os.replace(temporary, target)
-                self._send(200, {"ok": True})
-            elif self.path == "/api/test-login":
-                with CONFIG_LOCK:
-                    settings = load_settings()
-                if not settings["login_url"]:
-                    raise ValueError("请先保存登录页面地址。")
-                CONTROLLER.start({"name": "测试登录", "url": settings["login_url"], "test_login": True, **settings})
                 self._send(200, {"ok": True})
             elif self.path == "/api/operations":
                 name = str(body.get("name", "")).strip()
