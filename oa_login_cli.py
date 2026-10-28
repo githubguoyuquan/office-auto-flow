@@ -1180,7 +1180,7 @@ class AutomationController:
 
 
 PAGE_HTML = r'''<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1268,7 +1268,7 @@ PAGE_HTML = r'''<!doctype html>
   </style>
   <script>
     // Read preference before painting; this browser's choice survives server port changes.
-    try{const saved=document.cookie.split('; ').find(item=>item.startsWith('aioa-theme='))?.split('=')[1];document.documentElement.dataset.theme=saved==='dark'||saved==='light'?saved:(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light')}catch{document.documentElement.dataset.theme='light'}
+    try{const saved=document.cookie.split('; ').find(item=>item.startsWith('aioa-theme='))?.split('=')[1];document.documentElement.dataset.theme=saved==='dark'||saved==='light'?saved:'dark'}catch{document.documentElement.dataset.theme='dark'}
   </script>
 </head>
 <body>
