@@ -793,8 +793,9 @@ class AutomationController:
                          if item["name"] == "language"), "zh-cn") or "zh-cn"
         flags = {name: True for name in (
             "mainPic", "mainPart", "qhQty", "detailPic", "fcl",
-            "sizeDetail", "trouble", "BOMConfirm", "modifyRecord",
+            "sizeDetail", "trouble", "BOMConfirm",
         )}
+        flags["modifyRecord"] = False
         config = {
             "base": urljoin(operation["url"], "/activiti/"),
             "defaults": {"dataType": "Z400", "langu": language},
