@@ -20,7 +20,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, List
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 from trim_template import export_trim_xlsx
 
@@ -33,6 +33,11 @@ MAX_TEMPLATE_BYTES = 5 * 1024 * 1024
 MAX_BATCH_CODES = 200
 MAX_BATCH_FILE_BYTES = 5 * 1024 * 1024
 MAX_BATCH_WORKERS = 3
+FIXED_BUSINESS_OPERATION = {
+    "name": "工艺单打印",
+    "url": "http://noah.vgrass.com:8088/activiti/html/plm/styleManage/newStyleManage.html#9fdd2c3cfd7941b1bb1dadd4421360ba",
+    "description": "输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。",
+}
 CONFIG_LOCK = threading.Lock()
 DIRECTORY_PICKER_LOCK = threading.Lock()
 
@@ -69,13 +74,6 @@ def load_operations() -> List[dict]:
         ]
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError):
         return []
-
-
-def save_operations(operations: List[dict]) -> None:
-    target = data_dir() / "operations.json"
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(operations[:50], ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, target)
 
 
 def normalize_url(value: str) -> str:
@@ -244,10 +242,7 @@ def read_style_codes(filename: str, encoded: str) -> List[str]:
 
 
 def business_operations(settings: dict) -> List[dict]:
-    return [{"name": item["name"], "url": item["url"],
-             "description": item.get("description", "")} for item in load_operations()
-            if not urlparse(item["url"]).path.lower().endswith("/login.html")
-            and not (settings["login_url"] and same_page(item["url"], settings["login_url"]))]
+    return [dict(FIXED_BUSINESS_OPERATION)]
 
 
 def visible_locator(
@@ -342,7 +337,7 @@ def same_page(left: str, right: str) -> bool:
 
 def is_process_sheet(operation: dict) -> bool:
     url = urlparse(operation.get("url", ""))
-    return url.hostname == "noah.vgrass.com" and url.path.endswith("/plm/styleManage/newStyleManage.html")
+    return url.path.lower().endswith("/plm/stylemanage/newstylemanage.html")
 
 
 def open_business_page(page: Any, operation: dict) -> None:
@@ -375,18 +370,6 @@ def login_error_text(page: Any) -> str:
     return ""
 
 
-def dismiss_initial_password_modal(page: Any) -> bool:
-    button = page.locator(
-        '.modal-dialog button[data-dismiss="modal"][data-i18n="common_calcel"]'
-    ).first
-    try:
-        button.wait_for(state="visible", timeout=4_000)
-        button.click(timeout=4_000)
-        return True
-    except Exception:
-        return False
-
-
 def main_page_text(page: Any) -> str:
     useful = []
     seen = set()
@@ -408,8 +391,8 @@ def main_page_text(page: Any) -> str:
 def save_process_sheet_pdf(context: Any, page: Any, operation: dict, row: dict) -> tuple:
     style_code = operation["style_code"]
     directory = output_directory(operation["print_settings"]["original_dir"])
-    safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(row["id"]))[:50]
-    stem = f"{style_code}_次数{row['seq']}_{safe_id}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    stem = f"{style_code}_次数{row['seq']}_{timestamp}"
     destination = directory / f"{stem}.pdf"
     suffix = 2
     while destination.exists():
@@ -581,6 +564,7 @@ class AutomationController:
         self.messages = queue.Queue()
         self.jobs = queue.Queue()
         self.cancel_event = threading.Event()
+        self.batch_local = threading.local()
         self.shutdown_event = threading.Event()
         self.worker = None
         self.task_active = False
@@ -655,7 +639,8 @@ class AutomationController:
         self.update("stopping", "正在停止任务…")
 
     def check_cancelled(self) -> None:
-        if self.cancel_event.is_set():
+        batch_abort = getattr(self.batch_local, "abort", None)
+        if self.cancel_event.is_set() or (batch_abort is not None and batch_abort.is_set()):
             raise Cancelled()
 
     def _login_form_visible(self, page: Any) -> bool:
@@ -674,6 +659,8 @@ class AutomationController:
 
     def _wait_for_login(self, page: Any, operation: dict) -> None:
         if operation.get("batch_isolated"):
+            operation["_batch_auth_failure"].set()
+            operation["_batch_abort"].set()
             raise RuntimeError("并发任务的登录会话已失效；请结束当前批次并重新运行。")
         submitted_at = None
         first_seen_at = time.monotonic()
@@ -785,6 +772,7 @@ class AutomationController:
                 timeout=60_000,
             ) as query_response:
                 page.locator('button.btn_searchStyle').click()
+            self.check_cancelled()
             payload = query_response.value.json()
             if payload.get("code") != 10000 or not isinstance(payload.get("data"), dict):
                 raise RuntimeError(f"工艺单查询失败：{payload.get('message', '响应格式异常')}")
@@ -819,6 +807,7 @@ class AutomationController:
             if not row["id"] or key in seen:
                 raise RuntimeError("查询结果缺少唯一编号或发生变化，已停止以避免重复打印。")
             self.check_cancelled()
+            self.check_cancelled()
             self.update("reading", f"正在打开第 {len(printed)+1} 份工艺单（{style_code}，次数 {row['seq']}）…", step="select")
             radio = page.locator(f'.fixed-table-body-columns input[name="parentItem"][data-index="{row_index}"]')
             if not radio.count() or not radio.first.is_visible():
@@ -835,11 +824,13 @@ class AutomationController:
             unchecked = modal.locator('.eachCheckbox input[type="checkbox"]:not(:checked)').count()
             if unchecked:
                 raise RuntimeError("OA 未完成全部打印项勾选，已停止。")
+            self.check_cancelled()
             modal.locator('button.btn_tOPrint').click()
             page.wait_for_url("**/printAll.html?**", wait_until="domcontentloaded", timeout=60_000)
             actual_id = parse_qs(urlparse(page.url).query).get("bomtitleid", [None])[0]
             if actual_id != key:
                 raise RuntimeError(f"打开的工艺单与所选行不一致（预期 {key}，实际 {actual_id}）。")
+            self.check_cancelled()
             self.update("reading", f"正在保存第 {len(printed)+1} 份完整工艺单 PDF…", step="save_pdf")
             saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
             self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 XLSX…", step="convert")
@@ -892,7 +883,7 @@ class AutomationController:
                             install_noah_login_compatibility(context)
                             install_noah_print_compatibility(context)
                         if len(operation.get("style_codes", [])) > 1:
-                            self._run_batch(operation, context)
+                            self._run_batch(operation, context, playwright)
                         else:
                             if operation.get("style_codes"):
                                 operation["style_code"] = operation["style_codes"][0]
@@ -919,7 +910,7 @@ class AutomationController:
                 except Exception:
                     pass
 
-    def _run_batch(self, operation: dict, primary_context: Any) -> None:
+    def _run_batch(self, operation: dict, primary_context: Any, playwright: Any) -> None:
         from playwright.sync_api import sync_playwright
 
         codes = operation["style_codes"]
@@ -937,55 +928,194 @@ class AutomationController:
                 raise RuntimeError("登录未完成，批量任务尚未启动。")
         if not same_page(page.url, operation["url"]):
             raise RuntimeError(f"未到达工艺单列表，当前地址：{page.url}")
-        storage_state = primary_context.storage_state()
+        target = urlparse(operation["url"])
+        target_origin = f"{target.scheme}://{target.netloc}"
+        session_storage = page.evaluate("""() => Object.fromEntries(
+            Array.from({length: sessionStorage.length}, (_, index) => {
+                const key = sessionStorage.key(index);
+                return [key, sessionStorage.getItem(key)];
+            })
+        )""")
+
+        def make_session_script(values: dict) -> str:
+            return (
+                "(() => { if (location.origin !== " + json.dumps(target_origin) + ") return; "
+                "for (const [key, value] of Object.entries(" + json.dumps(values) + ")) "
+                "sessionStorage.setItem(key, value); })();"
+            )
+
         results = {}
-        self.update("reading", f"已准备 {len(codes)} 个款号，最多 {min(MAX_BATCH_WORKERS, len(codes))} 项并发处理中…",
+
+        def finish(phase: str, message: str) -> None:
+            completed = len(results)
+            lines = [f"{code}：{results[code].get('content') or results[code].get('message', results[code]['phase'])}"
+                     if code in results else f"{code}：未执行" for code in codes]
+            self.update(phase, message, step="convert", title=f"工艺单批量打印（{len(codes)} 个款号）",
+                        url=operation["url"], content="\n".join(lines),
+                        batch_total=len(codes), batch_completed=completed)
+
+        # Run one complete job in the already authenticated primary context.
+        first = codes[0]
+        self.update("reading", f"先处理第一个款号 {first}，完成后再启动并发任务…",
                     step="query", batch_total=len(codes), batch_completed=0)
+        first_result = self._run(dict(operation, style_code=first), primary_context, publish=False)
+        results[first] = first_result
+        if first_result["phase"] != "done":
+            phase = "cancelled" if first_result["phase"] == "cancelled" else "error"
+            finish(phase, f"首个款号 {first} 未完成，后续款号未启动：{first_result['message']}")
+            return
+        if self.cancel_event.is_set():
+            finish("cancelled", "任务已停止，首个款号结果已保留。")
+            return
+        remaining = codes[1:]
+        if not remaining:
+            finish("done", "批量任务已完成。")
+            return
 
-        def execute(code: str) -> dict:
-            job = dict(operation, style_code=code, batch_isolated=True)
-            with sync_playwright() as playwright:
-                try:
-                    browser = playwright.chromium.launch(channel="msedge", headless=False)
-                except Exception:
-                    browser = playwright.chromium.launch(headless=False)
-                try:
-                    context = browser.new_context(storage_state=storage_state)
-                    context.add_init_script(LOGIN_SUBMIT_GUARD)
-                    install_noah_login_compatibility(context)
-                    install_noah_print_compatibility(context)
+        page = primary_context.new_page()
+        page.add_init_script(make_session_script(session_storage))
+        open_business_page(page, operation)
+        page.wait_for_timeout(1_800)
+        if self._on_login_page(page, operation):
+            self._wait_for_login(page, operation)
+            if not same_page(page.url, operation["url"]):
+                open_business_page(page, operation)
+                page.wait_for_timeout(1_200)
+        if not same_page(page.url, operation["url"]) or self._on_login_page(page, operation):
+            finish("error", "首个款号已完成，但 OA 登录状态已失效，后续款号未启动。")
+            return
+        storage_state = primary_context.storage_state()
+        session_storage = page.evaluate("""() => Object.fromEntries(
+            Array.from({length: sessionStorage.length}, (_, index) => {
+                const key = sessionStorage.key(index);
+                return [key, sessionStorage.getItem(key)];
+            })
+        )""")
+        session_script = make_session_script(session_storage)
+        worker_count = min(MAX_BATCH_WORKERS, len(remaining))
+        pending = queue.Queue()
+        for code in remaining:
+            pending.put(code)
+        batch_abort = threading.Event()
+        auth_failure = threading.Event()
+        ready = threading.Event()
+        startup_lock = threading.Lock()
+        result_lock = threading.Lock()
+        ready_count = [0]
+        reasons = []
+
+        def stop_all(reason: str, authentication: bool = False) -> None:
+            with result_lock:
+                if not reasons:
+                    reasons.append(reason)
+            if authentication:
+                auth_failure.set()
+            batch_abort.set()
+            ready.set()
+
+        def is_login_url(url: str) -> bool:
+            return (urlparse(url).path.lower().endswith("/login.html") or
+                    bool(operation.get("login_url") and same_page(url, operation["login_url"])))
+
+        def worker(index: int) -> None:
+            self.batch_local.abort = batch_abort
+            browser = None
+            try:
+                with sync_playwright() as worker_playwright:
                     try:
-                        return self._run(job, context, publish=False)
+                        # Only one worker can open and validate its browser at a time.
+                        with startup_lock:
+                            if batch_abort.is_set() or self.cancel_event.is_set():
+                                return
+                            try:
+                                browser = worker_playwright.chromium.launch(channel="msedge", headless=False)
+                            except Exception:
+                                browser = worker_playwright.chromium.launch(headless=False)
+                            context = browser.new_context(storage_state=storage_state)
+                            context.add_init_script(session_script)
+                            context.add_init_script(LOGIN_SUBMIT_GUARD)
+                            install_noah_login_compatibility(context)
+                            install_noah_print_compatibility(context)
+
+                            def guard_login(route: Any) -> None:
+                                request = route.request
+                                if request.is_navigation_request() and is_login_url(request.url):
+                                    stop_all("并发窗口的 OA 登录已失效，已停止后续款号。", True)
+                                    route.abort()
+                                elif request.is_navigation_request() and (batch_abort.is_set() or self.cancel_event.is_set()):
+                                    route.abort()
+                                else:
+                                    route.fallback()
+
+                            def guard_redirect(response: Any) -> None:
+                                if response.request.is_navigation_request() and 300 <= response.status < 400:
+                                    location = response.headers.get("location", "")
+                                    if location and is_login_url(urljoin(response.url, location)):
+                                        stop_all("并发窗口的 OA 登录已失效，已停止后续款号。", True)
+                                        response.request.frame.page.close()
+
+                            context.route("**/*", guard_login)
+                            context.on("response", guard_redirect)
+                            check_page = context.new_page()
+                            open_business_page(check_page, operation)
+                            check_page.wait_for_timeout(1_800)
+                            if self._on_login_page(check_page, operation):
+                                stop_all("并发窗口未继承 OA 登录状态，后续款号未启动。", True)
+                                return
+                            if not same_page(check_page.url, operation["url"]):
+                                stop_all(f"第 {index} 个并发窗口未到达工艺单列表。")
+                                return
+                            ready_count[0] += 1
+                            if ready_count[0] == worker_count:
+                                ready.set()
+                        while not ready.wait(0.2):
+                            if self.cancel_event.is_set():
+                                batch_abort.set()
+                                ready.set()
+                        while not batch_abort.is_set() and not self.cancel_event.is_set():
+                            with result_lock:
+                                if batch_abort.is_set() or self.cancel_event.is_set():
+                                    break
+                                try:
+                                    code = pending.get_nowait()
+                                except queue.Empty:
+                                    break
+                            job = dict(operation, style_code=code, batch_isolated=True,
+                                       _batch_abort=batch_abort, _batch_auth_failure=auth_failure)
+                            result = self._run(job, context, publish=False)
+                            with result_lock:
+                                results[code] = result
+                                completed = len(results)
+                            if auth_failure.is_set():
+                                stop_all("并发窗口的 OA 登录已失效，已停止后续款号。", True)
+                            elif not batch_abort.is_set() and not self.cancel_event.is_set():
+                                self.update("reading", f"批量进度 {completed}/{len(codes)}；最近完成：{code}（{result['phase']}）",
+                                            step="convert" if result["phase"] == "done" else "query",
+                                            batch_total=len(codes), batch_completed=completed)
+                    except Exception as error:
+                        if not batch_abort.is_set() and not self.cancel_event.is_set():
+                            stop_all(f"第 {index} 个并发窗口启动失败：{error}")
                     finally:
-                        context.close()
-                finally:
-                    browser.close()
+                        if browser is not None:
+                            browser.close()
+            finally:
+                del self.batch_local.abort
 
-        with ThreadPoolExecutor(max_workers=min(MAX_BATCH_WORKERS, len(codes))) as pool:
-            futures = {pool.submit(execute, code): code for code in codes}
+        self.update("opening", f"首个款号已完成，正在逐个验证 {worker_count} 个并发窗口…",
+                    step="open", batch_total=len(codes), batch_completed=1)
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            futures = [pool.submit(worker, index) for index in range(1, worker_count + 1)]
             for future in as_completed(futures):
-                code = futures[future]
-                try:
-                    result = future.result()
-                except Exception as error:
-                    result = {"phase": "error", "message": f"执行失败：{error}"}
-                results[code] = result
-                completed = len(results)
-                self.update(
-                    "reading", f"批量进度 {completed}/{len(codes)}；最近完成：{code}（{result['phase']}）",
-                    step="convert" if result["phase"] == "done" else "query",
-                    batch_total=len(codes), batch_completed=completed,
-                )
+                future.result()
 
-        failures = [(code, results[code]) for code in codes if results[code]["phase"] != "done"]
-        lines = [f"{code}：{results[code].get('content') or results[code].get('message', results[code]['phase'])}"
-                 for code in codes]
-        summary = {"title": f"工艺单批量打印（{len(codes)} 个款号）",
-                   "url": operation["url"], "content": "\n".join(lines),
-                   "batch_total": len(codes), "batch_completed": len(codes)}
-        self.update("error" if failures else "done",
-                    f"批量任务结束：成功 {len(codes)-len(failures)} 个，失败 {len(failures)} 个。",
-                    step="convert", **summary)
+        if self.cancel_event.is_set():
+            finish("cancelled", "批量任务已停止，已完成的结果已保留。")
+        elif batch_abort.is_set():
+            finish("error", reasons[0] if reasons else "并发任务已停止，已完成的结果已保留。")
+        else:
+            failures = sum(result["phase"] != "done" for result in results.values())
+            finish("error" if failures else "done",
+                   f"批量任务结束：成功 {len(results)-failures} 个，失败 {failures} 个。")
 
     def _run(self, operation: dict, context: Any, publish: bool = True) -> dict:
         final_phase = "error"
@@ -1012,8 +1142,6 @@ class AutomationController:
             if not same_page(page.url, operation["url"]):
                 raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
 
-            if dismiss_initial_password_modal(page):
-                self.update("opening", "已关闭修改初始密码提示。")
             if is_process_sheet(operation):
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
@@ -1152,10 +1280,10 @@ PAGE_HTML = r'''<!doctype html>
       </div>
       <div class="workspace">
         <section class="panel" aria-label="业务操作">
-          <div class="panel-heading"><div><p class="section-kicker">BUSINESS OPERATIONS</p><h3>业务操作</h3><div class="panel-sub">选择已配置业务，或创建一个新入口</div></div><button class="primary with-icon" id="addButton"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>新增业务</button></div>
+          <div class="panel-heading"><div><p class="section-kicker">BUSINESS OPERATIONS</p><h3>业务操作</h3><div class="panel-sub">选择业务开始运行</div></div></div>
           <div class="search-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg><input class="search" id="searchInput" placeholder="搜索业务名称或地址" aria-label="搜索业务"></div>
           <div class="operation-list" id="operationList"></div>
-          <div class="detail"><div class="detail-head"><span class="detail-label">当前选择</span><div class="detail-actions"><button class="text-btn" id="editButton" hidden>编辑</button><button class="text-btn danger" id="deleteButton" hidden>删除</button></div></div><div id="selectionDetail" class="detail-none">尚未选择业务操作</div></div>
+          <div class="detail"><div class="detail-head"><span class="detail-label">当前选择</span></div><div id="selectionDetail" class="detail-none">尚未选择业务操作</div></div>
         </section>
         <section class="panel" aria-label="运行任务">
           <div class="panel-heading run-head"><div><p class="section-kicker">TASK EXECUTION</p><h3>运行任务</h3><div class="panel-sub">执行过程和页面结果实时更新</div></div><span class="status-badge" id="statusBadge">待开始</span></div>
@@ -1173,7 +1301,6 @@ PAGE_HTML = r'''<!doctype html>
     </main>
   </div>
 </div>
-<div class="modal-backdrop" id="modalBackdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle"><div class="modal-top"><h3 id="modalTitle">新增业务操作</h3><button class="icon-btn" id="closeModal" aria-label="关闭">×</button></div><p>填写业务名称、描述和页面地址，登录地址统一在系统设置中配置。</p><form id="operationForm"><label class="field-label" for="operationName">业务名称</label><input class="field" id="operationName" maxlength="60" placeholder="例如：订单查询" required><label class="field-label" for="operationDescription">业务描述</label><textarea class="field" id="operationDescription" maxlength="200" rows="2" placeholder="简要说明任务会执行什么操作"></textarea><label class="field-label" for="operationUrl">业务页面 URL</label><input class="field" id="operationUrl" type="url" placeholder="https://example.com/oa/orders" required><div class="modal-actions"><button class="ghost" type="button" id="cancelModal">取消</button><button class="primary" type="submit" id="saveButton">保存业务</button></div></form></div></div>
 <div class="toast" id="toast" role="status"></div>
 <script>
   const businessPanel = document.querySelector('[aria-label="业务操作"]');
@@ -1208,7 +1335,7 @@ PAGE_HTML = r'''<!doctype html>
   for(const [buttonId,fieldId] of [['chooseOriginalDir','originalDir'],['chooseConvertedDir','convertedDir']]){
     $(buttonId).addEventListener('click',async()=>{if(choosingDirectory)return;choosingDirectory=true;$(buttonId).textContent='选择中…';renderTask();try{const data=await api('/api/choose-directory','POST',{initial:$(fieldId).value});if(data.path)$(fieldId).value=data.path}catch(error){toast(error.message)}finally{choosingDirectory=false;$(buttonId).textContent='选择文件夹';renderTask()}});
   }
-  function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.hostname==='noah.vgrass.com'&&u.pathname.endsWith('/plm/styleManage/newStyleManage.html')}catch{return false}}
+  function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.pathname.toLowerCase().endsWith('/plm/stylemanage/newstylemanage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
   settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="submit" class="primary">保存设置</button></div></form></div>';
@@ -1218,7 +1345,7 @@ PAGE_HTML = r'''<!doctype html>
   settingsModal.addEventListener('click',event=>{if(event.target===settingsModal)$('closeSettings').click()});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&settingsModal.classList.contains('open'))$('closeSettings').click()});
   $('settingsForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});$('closeSettings').click();await refresh();toast('系统设置已保存')}catch(error){toast(error.message)}};
-  let operations = [], selectedName = '', currentTask = {phase:'idle'}, editingName = '', toastTimer, initialPromptShown = false, printSettingsInitialized = false, lastPrintSettingsKey = '';
+  let operations = [], selectedName = '', currentTask = {phase:'idle'}, toastTimer, printSettingsInitialized = false, lastPrintSettingsKey = '';
   function syncPrintSettings(settings){if(!settings)return;const key=JSON.stringify([settings.original_history,settings.converted_history,settings.templates,settings.template_id]);if(printSettingsInitialized&&key===lastPrintSettingsKey)return;lastPrintSettingsKey=key;if(!printSettingsInitialized){$('originalDir').value=settings.original_dir||'';$('convertedDir').value=settings.converted_dir||'';printSettingsInitialized=true}for(const [name,values] of [['originalHistory',settings.original_history],['convertedHistory',settings.converted_history]]){const list=$(name);list.replaceChildren();for(const value of values||[]){const option=document.createElement('option');option.value=value;list.append(option)}}const select=$('templateHistory'),before=select.value;select.replaceChildren();const empty=document.createElement('option');empty.value='';empty.textContent='请选择或上传 XLSX 模板';select.append(empty);for(const item of settings.templates||[]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name+' · '+item.uploaded_at;select.append(option)}select.value=before&&[...select.options].some(o=>o.value===before)?before:(settings.template_id||'')}
   $('templateFile').addEventListener('change',async()=>{const file=$('templateFile').files[0];if(!file)return;if(file.size>5*1024*1024){toast('模板不能超过 5 MB');return}try{const content=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('模板读取失败'));reader.readAsDataURL(file)});const data=await api('/api/template','POST',{filename:file.name,content});await refresh();$('templateHistory').value=data.template.id;toast('模板已保存，下次默认使用')}catch(error){toast(error.message)}});
   const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
@@ -1238,11 +1365,11 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderOperations(){
     const list=$('operationList');list.replaceChildren();const query=$('searchInput').value.trim().toLocaleLowerCase();const filtered=operations.filter(item=>(item.name+' '+item.url+' '+(item.login_url||'')).toLocaleLowerCase().includes(query));
-    if(!filtered.length){const wrap=document.createElement('div');wrap.className='empty';wrap.innerHTML='<div class="empty-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 10h8M8 14h6"/></svg></div><h4>'+(operations.length?'没有找到匹配的业务':'还没有业务操作')+'</h4><p>'+(operations.length?'试试其他名称或地址':'点击右上角「新增业务」开始配置')+'</p>';list.append(wrap)}
+    if(!filtered.length){const wrap=document.createElement('div');wrap.className='empty';wrap.innerHTML='<div class="empty-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 10h8M8 14h6"/></svg></div><h4>'+(operations.length?'没有找到匹配的业务':'还没有业务操作')+'</h4><p>'+(operations.length?'试试其他名称或地址':'暂无可用业务')+'</p>';list.append(wrap)}
     for(const item of filtered){const button=document.createElement('button');button.className='operation'+(item.name===selectedName?' selected':'');button.type='button';button.setAttribute('aria-pressed',item.name===selectedName?'true':'false');const icon=document.createElement('span');icon.className='op-icon';icon.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5h16v11H4z"/><path d="M8 10h8M8 13.5h5"/></svg>';const copy=document.createElement('span');copy.className='op-copy';const name=document.createElement('div');name.className='op-name';name.textContent=item.name;const url=document.createElement('div');url.className='op-url';url.textContent=item.url;copy.append(name,url);const arrow=document.createElement('span');arrow.className='op-arrow';arrow.textContent='›';button.append(icon,copy,arrow);button.addEventListener('click',()=>{selectedName=item.name;renderOperations();renderDetail();renderTask()});list.append(button)}
     $('countValue').textContent=operations.length+' 项';
   }
-  function renderDetail(){const item=selected();$('editButton').hidden=!item;$('deleteButton').hidden=!item;const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
+  function renderDetail(){const item=selected();const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
     $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
     for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
@@ -1252,15 +1379,11 @@ PAGE_HTML = r'''<!doctype html>
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
     $('runButton').disabled=!canRun(chosen);$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
-    const hasResult=(phase==='done'||(phase==='error'&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
+    const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
-  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();if(!initialPromptShown){initialPromptShown=true;if(!operations.length)openModal()}}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
-  function openModal(edit=false){const item=edit?selected():null;editingName=item?item.name:'';$('modalTitle').textContent=item?'编辑业务操作':'新增业务操作';$('operationName').value=item?item.name:'';$('operationDescription').value=item?item.description||'':'';$('operationUrl').value=item?item.url:'';$('modalBackdrop').classList.add('open');$('operationName').focus()}
-  function closeModal(){$('modalBackdrop').classList.remove('open');editingName=''}
-  $('addButton').addEventListener('click',()=>openModal());$('editButton').addEventListener('click',()=>openModal(true));$('closeModal').addEventListener('click',closeModal);$('cancelModal').addEventListener('click',closeModal);$('modalBackdrop').addEventListener('click',event=>{if(event.target===$('modalBackdrop'))closeModal()});document.addEventListener('keydown',event=>{if(event.key==='Escape')closeModal()});$('searchInput').addEventListener('input',renderOperations);
-  $('operationForm').addEventListener('submit',async event=>{event.preventDefault();const name=$('operationName').value.trim(),description=$('operationDescription').value.trim(),url=$('operationUrl').value.trim();try{await api('/api/operations','POST',{name,description,url,old_name:editingName});selectedName=name;closeModal();await refresh();toast('业务操作已保存')}catch(error){toast(error.message)}});
+  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
+  $('searchInput').addEventListener('input',renderOperations);
   for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,renderTask)}
-  $('deleteButton').addEventListener('click',async()=>{const item=selected();if(!item||!confirm('确定删除“'+item.name+'”吗？'))return;try{await api('/api/operations','DELETE',{name:item.name});selectedName='';await refresh();toast('业务操作已删除')}catch(error){toast(error.message)}});
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
@@ -1370,31 +1493,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                     os.replace(temporary, target)
                 self._send(200, {"ok": True})
             elif self.path == "/api/operations":
-                name = str(body.get("name", "")).strip()
-                description = str(body.get("description", "")).strip()
-                old_name = str(body.get("old_name", "")).strip()
-                if not name or len(name) > 60:
-                    raise ValueError("业务名称须为 1–60 个字符。")
-                if len(description) > 200:
-                    raise ValueError("业务描述不能超过 200 个字符。")
-                url = normalize_url(str(body.get("url", "")))
-                operation = {"name": name, "url": url, "description": description}
-                with CONFIG_LOCK:
-                    settings = load_settings()
-                    if urlparse(url).path.lower().endswith("/login.html") or (settings["login_url"] and same_page(url, settings["login_url"])):
-                        raise ValueError("登录地址请在系统设置中配置，无需添加为业务。")
-                    existing = load_operations()
-                    if old_name and not any(item["name"] == old_name for item in existing):
-                        raise ValueError("原业务操作不存在，请刷新页面。")
-                    if old_name and old_name.casefold() != name.casefold() and any(item["name"].casefold() == name.casefold() for item in existing):
-                        raise ValueError("该业务名称已存在。")
-                    if not old_name and any(item["name"].casefold() == name.casefold() for item in existing):
-                        raise ValueError("该业务名称已存在，请使用编辑操作。")
-                    if not old_name and len(existing) >= 50:
-                        raise ValueError("最多保存 50 个业务操作。")
-                    removed_name = old_name or name
-                    save_operations([operation] + [item for item in existing if item["name"].casefold() != removed_name.casefold()])
-                self._send(200, {"ok": True})
+                self._send(403, {"error": "业务由系统内置，不能修改。"})
             elif self.path == "/api/run":
                 name = str(body.get("name", ""))
                 with CONFIG_LOCK:
@@ -1442,21 +1541,10 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:
         if not self._authorized():
             self._send(403, {"error": "访问被拒绝。"})
-            return
-        if self.path != "/api/operations":
+        elif self.path == "/api/operations":
+            self._send(403, {"error": "业务由系统内置，不能删除。"})
+        else:
             self._send(404, {"error": "接口不存在。"})
-            return
-        try:
-            name = str(self._body().get("name", ""))
-            with CONFIG_LOCK:
-                existing = load_operations()
-                updated = [item for item in existing if item["name"] != name]
-                if len(updated) == len(existing):
-                    raise ValueError("业务操作不存在。")
-                save_operations(updated)
-            self._send(200, {"ok": True})
-        except (ValueError, json.JSONDecodeError) as error:
-            self._send(400, {"error": str(error)})
 
 
 def run() -> int:
