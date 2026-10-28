@@ -33,6 +33,11 @@ MAX_TEMPLATE_BYTES = 5 * 1024 * 1024
 MAX_BATCH_CODES = 200
 MAX_BATCH_FILE_BYTES = 5 * 1024 * 1024
 MAX_BATCH_WORKERS = 3
+LOGIN_COOKIE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+LOGIN_COOKIE_NAMES = frozenset({
+    "is_login", "userSysTag", "language", "JSESSIONID", "SESSION", "SESSIONID",
+    "sid", "token", "access_token", "auth_token", "rememberMe",
+})
 FIXED_BUSINESS_OPERATION = {
     "name": "工艺单打印",
     "url": "http://noah.vgrass.com:8088/activiti/html/plm/styleManage/newStyleManage.html#9fdd2c3cfd7941b1bb1dadd4421360ba",
@@ -497,6 +502,28 @@ def launch_context(playwright: Any) -> Any:
         )
 
 
+def preserve_login_session(context: Any, operation: dict) -> bool:
+    """Keep authenticated session cookies in Chromium's existing user profile."""
+    business_url = operation["url"]
+    urls = [business_url]
+    login_url = operation.get("login_url") or ""
+    if login_url and urlparse(login_url).hostname == urlparse(business_url).hostname:
+        urls.append(login_url)
+    cookies = context.cookies(urls)
+    if not any(cookie["name"] == "is_login" and cookie["value"] == "true" for cookie in cookies):
+        return False
+    expires = time.time() + LOGIN_COOKIE_RETENTION_SECONDS
+    session_cookies = []
+    for cookie in cookies:
+        if (cookie["name"] in LOGIN_COOKIE_NAMES or cookie["name"].startswith("u_")) and cookie.get("expires", -1) <= 0:
+            persistent = dict(cookie)
+            persistent["expires"] = expires
+            session_cookies.append(persistent)
+    if session_cookies:
+        context.add_cookies(session_cookies)
+    return True
+
+
 LOGIN_SUBMIT_GUARD = r"""
 (() => {
   function guard(event) {
@@ -725,6 +752,10 @@ class AutomationController:
             if form_seen and not self._on_login_page(page, operation):
                 page.wait_for_timeout(1100)
                 if not self._on_login_page(page, operation):
+                    try:
+                        preserve_login_session(page.context, operation)
+                    except Exception:
+                        self.update("opening", "登录成功，但登录状态未能保存；关闭浏览器后可能需要重新登录。")
                     return
             elif submitted_at and time.monotonic() - submitted_at > 10:
                 self.update(
@@ -880,6 +911,7 @@ class AutomationController:
 
     def _worker_loop(self) -> None:
         context = None
+        context_closed = threading.Event()
         try:
             from playwright.sync_api import sync_playwright
 
@@ -890,8 +922,15 @@ class AutomationController:
                     except queue.Empty:
                         continue
                     try:
-                        if context is None:
+                        if context is not None and not context_closed.is_set():
+                            try:
+                                context.cookies(operation["url"])
+                            except Exception:
+                                context_closed.set()
+                        if context is None or context_closed.is_set():
                             context = launch_context(playwright)
+                            context_closed = threading.Event()
+                            context.on("close", lambda *_, closed=context_closed: closed.set())
                             context.add_init_script(LOGIN_SUBMIT_GUARD)
                             install_noah_login_compatibility(context)
                             install_noah_print_compatibility(context)
@@ -1155,6 +1194,12 @@ class AutomationController:
             if not same_page(page.url, operation["url"]):
                 raise RuntimeError(f"未到达业务落地页，当前地址：{page.url}")
 
+            if not operation.get("batch_isolated"):
+                try:
+                    preserve_login_session(context, operation)
+                except Exception:
+                    self.update("opening", "登录状态未能保存；关闭浏览器后可能需要重新登录。")
+
             if is_process_sheet(operation):
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
@@ -1305,7 +1350,7 @@ PAGE_HTML = r'''<!doctype html>
             <div class="status-card"><div class="status-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg></div><div><div class="status-title" id="statusTitle">准备就绪</div><div class="status-message" id="statusMessage">选择左侧业务操作后，即可开始。</div></div></div>
             <div class="login-card" id="loginCard" hidden><h4>完成 OA 登录</h4><p>在这里填写账号密码后，工具会将其填入 OA 页面。验证码请在 OA 浏览器中输入，再点击页面上的“登录”。</p><form id="loginForm"><div class="login-grid"><div><label class="field-label" for="username">用户名</label><input class="field" id="username" autocomplete="username" required></div><div><label class="field-label" for="password">密码</label><input class="field" id="password" type="password" autocomplete="current-password" required></div></div><button class="primary login-submit" type="submit" id="loginButton">填入 OA 页面</button></form></div>
             <div class="run-actions"><button class="primary" id="runButton" disabled>开始运行</button><button class="ghost" id="stopButton" hidden>停止任务</button></div>
-            <p class="fine-print">密码仅用于本次登录，不写入业务配置。浏览器会在读取页面后自动关闭。</p>
+            <p class="fine-print">密码不会保存；登录状态保存在本机浏览器配置中，OA 会话失效后需重新登录。</p>
             <div class="result" id="result" hidden><div class="result-top"><h4 id="resultHeading">页面主要内容</h4><span class="result-meta" id="resultTime"></span></div><div class="result-title" id="resultTitle"></div><p class="result-url" id="resultUrl"></p><pre id="resultContent"></pre></div>
           </div>
         </section>
