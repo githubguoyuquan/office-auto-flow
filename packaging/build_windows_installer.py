@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Build the per-user Windows browser workbench installer with NSIS."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+from PIL import Image, ImageDraw
+
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_PAYLOAD = ROOT / "preview" / "Office-Auto-Flow-Browser-d218cd3"
+DEFAULT_OUTPUT = ROOT / "preview" / "Office-Auto-Flow-Browser-Setup-d218cd3-win-x64.exe"
+
+
+def make_icon(destination: Path) -> None:
+    image = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((8, 8, 247, 247), radius=55, fill=(33, 33, 33, 255))
+    draw.line(((59, 183), (126, 63), (195, 183)), fill=(239, 239, 239, 255), width=20, joint="curve")
+    draw.rounded_rectangle((92, 132, 164, 149), radius=8, fill=(112, 218, 181, 255))
+    image.save(destination, format="ICO", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+
+def update_user_guide(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    start = text.index("二、启动工作台")
+    end = text.index("三、首次配置与执行", start)
+    install_steps = """二、安装和启动
+1. 双击安装程序，按提示完成安装。默认安装到当前 Windows 用户的本地程序目录，无需管理员权限。
+2. 双击桌面的“AIOA 浏览器工作台”图标启动，也可在开始菜单中找到该入口。
+3. 浏览器会打开本机工作台 http://127.0.0.1:54418/。运行期间请保持命令窗口打开；关闭该窗口即可退出。
+4. 工作台默认使用深色界面，可通过右上角按钮切换浅色或深色，选择会被记住。
+5. 如果提示端口已被占用，先关闭之前启动的工作台，再重新打开桌面图标。
+6. 可在 Windows“设置 → 应用”或开始菜单中卸载。卸载会保留工作台配置、浏览器会话和导出文件。
+
+"""
+    path.write_text(text[:start] + install_steps + text[end:], encoding="utf-8")
+
+
+def nsis_path(path: str) -> str:
+    return path.replace("$", "$$").replace('"', '$\\"')
+
+
+def build_script(payload: Path, output: Path, version: str) -> str:
+    files = sorted(p for p in payload.rglob("*") if p.is_file())
+    dirs = sorted((p for p in payload.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True)
+    remove_files = "\n".join('  Delete "$INSTDIR\\' + nsis_path(str(p.relative_to(payload)).replace("/", "\\")) + '"' for p in files)
+    remove_dirs = "\n".join('  RMDir "$INSTDIR\\' + nsis_path(str(p.relative_to(payload)).replace("/", "\\")) + '"' for p in dirs)
+    payload_path = nsis_path(str(payload))
+    output_path = nsis_path(str(output))
+    return f'''Unicode true
+!include "MUI2.nsh"
+!include "LogicLib.nsh"
+!include "x64.nsh"
+!include "WinVer.nsh"
+Name "Office Auto Flow Browser"
+OutFile "{output_path}"
+InstallDir "$LOCALAPPDATA\\Programs\\Office Auto Flow Browser"
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+CRCCheck on
+ShowInstDetails show
+ShowUninstDetails show
+VIProductVersion "0.1.0.0"
+VIAddVersionKey /LANG=2052 "ProductName" "Office Auto Flow Browser"
+VIAddVersionKey /LANG=2052 "FileDescription" "Office Auto Flow Browser 安装程序"
+VIAddVersionKey /LANG=2052 "FileVersion" "{version}"
+VIAddVersionKey /LANG=2052 "LegalCopyright" ""
+!define MUI_ABORTWARNING
+!define MUI_FINISHPAGE_RUN "$INSTDIR\\start_oa_login.bat"
+!define MUI_FINISHPAGE_RUN_TEXT "启动工作台"
+!define MUI_FINISHPAGE_RUN_NOTCHECKED
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "SimpChinese"
+
+Function .onInit
+  SetShellVarContext current
+  ${{IfNot}} ${{RunningX64}}
+    MessageBox MB_ICONSTOP "此版本需要 64 位 Windows。"
+    Abort
+  ${{EndIf}}
+  ${{IfNot}} ${{AtLeastWin10}}
+    MessageBox MB_ICONSTOP "此版本需要 Windows 10 或 Windows 11。"
+    Abort
+  ${{EndIf}}
+FunctionEnd
+
+Section "安装工作台" SEC_MAIN
+  SetOutPath "$INSTDIR"
+  SetOverwrite on
+  File /r "{payload_path}/*"
+  WriteUninstaller "$INSTDIR\\Uninstall.exe"
+  CreateDirectory "$SMPROGRAMS\\Office Auto Flow Browser"
+  CreateShortCut "$DESKTOP\\AIOA 浏览器工作台.lnk" "$INSTDIR\\start_oa_login.bat" "" "$INSTDIR\\app.ico" 0 SW_SHOWNORMAL "" "启动工艺单自动化工作台"
+  CreateShortCut "$SMPROGRAMS\\Office Auto Flow Browser\\AIOA 浏览器工作台.lnk" "$INSTDIR\\start_oa_login.bat" "" "$INSTDIR\\app.ico"
+  CreateShortCut "$SMPROGRAMS\\Office Auto Flow Browser\\卸载.lnk" "$INSTDIR\\Uninstall.exe"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "DisplayName" "Office Auto Flow Browser"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "DisplayVersion" "{version}"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "InstallLocation" "$INSTDIR"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "DisplayIcon" "$INSTDIR\\app.ico"
+  WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "UninstallString" '"$INSTDIR\\Uninstall.exe"'
+  WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "NoModify" 1
+  WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser" "NoRepair" 1
+SectionEnd
+
+Function un.onInit
+  SetShellVarContext current
+FunctionEnd
+
+Section "Uninstall"
+  Delete "$DESKTOP\\AIOA 浏览器工作台.lnk"
+  Delete "$SMPROGRAMS\\Office Auto Flow Browser\\AIOA 浏览器工作台.lnk"
+  Delete "$SMPROGRAMS\\Office Auto Flow Browser\\卸载.lnk"
+  RMDir "$SMPROGRAMS\\Office Auto Flow Browser"
+{remove_files}
+  Delete "$INSTDIR\\Uninstall.exe"
+{remove_dirs}
+  RMDir "$INSTDIR"
+  DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowBrowser"
+SectionEnd
+'''
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--payload", type=Path, default=DEFAULT_PAYLOAD)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--makensis", required=True, type=Path)
+    parser.add_argument("--nsis-dir", required=True, type=Path)
+    parser.add_argument("--version", default="0.1.0-preview.d218cd3")
+    args = parser.parse_args()
+    payload, output = args.payload.resolve(), args.output.resolve()
+    if not (payload / "runtime" / "python.exe").is_file():
+        parser.error("payload 缺少 Windows Python 运行时")
+    if (payload / "oa_login_cli.py").read_bytes() != (ROOT / "oa_login_cli.py").read_bytes():
+        parser.error("payload 的应用代码与当前分支不一致")
+    if output.exists():
+        parser.error(f"输出文件已存在，请指定新路径：{output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="aioa-windows-installer-") as temporary:
+        temp = Path(temporary)
+        staged = temp / "payload"
+        shutil.copytree(payload, staged)
+        make_icon(staged / "app.ico")
+        update_user_guide(staged / "使用说明.txt")
+        source = temp / "installer.nsi"
+        source.write_text(build_script(staged, output, args.version), encoding="utf-8-sig")
+        environment = dict(os.environ, NSISDIR=str(args.nsis_dir.resolve()))
+        subprocess.run([str(args.makensis.resolve()), "-V2", str(source)], env=environment, check=True)
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    output.with_suffix(output.suffix + ".sha256").write_text(f"{digest}  {output.name}\n", encoding="ascii")
+    print(f"安装程序：{output}\nSHA-256：{digest}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
