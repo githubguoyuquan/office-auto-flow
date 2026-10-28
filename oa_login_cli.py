@@ -20,7 +20,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, List
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 from trim_template import export_trim_xlsx
 
@@ -340,12 +340,12 @@ def is_process_sheet(operation: dict) -> bool:
     return url.path.lower().endswith("/plm/stylemanage/newstylemanage.html")
 
 
-def open_business_page(page: Any, operation: dict) -> None:
+def open_business_page(page: Any, operation: dict, wait_until: str = "domcontentloaded") -> None:
     target = operation["url"]
     if (urlparse(target).path.lower().endswith("/login.html")
             or (operation.get("login_url") and same_page(target, operation["login_url"]))):
         raise ValueError("业务地址指向登录页，已阻止主动跳转。")
-    page.goto(target, wait_until="domcontentloaded", timeout=60_000)
+    page.goto(target, wait_until=wait_until, timeout=60_000)
 
 
 def captcha_visible(page: Any) -> bool:
@@ -753,29 +753,27 @@ class AutomationController:
         raise RuntimeError(f"工艺单列表初始化超时，当前页面：{page.url}。请检查 OA 页面提示或脚本加载状态。")
 
     def _print_process_sheets(self, context: Any, page: Any, operation: dict) -> dict:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
         style_code = operation["style_code"]
-        self._wait_for_process_sheet(page, operation)
         self.check_cancelled()
         self.update("reading", f"正在通过接口查询款号 {style_code}…", step="query")
-        config = page.evaluate("""() => {
-          const flags = {};
-          for (const input of document.querySelectorAll('#printModel .eachCheckbox input[type="checkbox"]')) {
-            flags[input.value] = true;
-          }
-          return {
-            base: new URL(SYS.Config.apiRoot, location.href).href,
-            defaults: SYS.Tool.serializeForm2Obj('#searchForm', true),
-            language: $.cookie('language') || 'zh-cn',
-            printLanguage: document.querySelector('#langu')?.value || 'zh-cn',
-            flags
-          };
-        }""")
-        if not config.get("flags"):
-            raise RuntimeError("OA 页面没有可用的打印项，已停止。")
-        page.evaluate("""({flags, language}) => {
-          $.cookie('printFlagObj', JSON.stringify(flags));
-          $.cookie('printLanguage', language);
-        }""", {"flags": config["flags"], "language": config["printLanguage"]})
+        language = next((item["value"] for item in context.cookies(operation["url"])
+                         if item["name"] == "language"), "zh-cn") or "zh-cn"
+        flags = {name: True for name in (
+            "mainPic", "mainPart", "qhQty", "detailPic", "fcl",
+            "sizeDetail", "trouble", "BOMConfirm", "modifyRecord",
+        )}
+        config = {
+            "base": urljoin(operation["url"], "/activiti/"),
+            "defaults": {"dataType": "Z400", "langu": language},
+            "language": language,
+            "printLanguage": language,
+        }
+        context.add_cookies([
+            {"name": "printFlagObj", "value": quote(json.dumps(flags, separators=(",", ":"))), "url": operation["url"]},
+            {"name": "printLanguage", "value": quote(language), "url": operation["url"]},
+        ])
 
         def post_oa(path: str, data: dict) -> dict:
             self.check_cancelled()
@@ -852,13 +850,26 @@ class AutomationController:
             params["zzdsnno"] = item.get("zzdsnNo") or item.get("zzdsnno") or ""
             if index:
                 page = context.new_page()
-            page.goto(print_url + "?" + urlencode(params), wait_until="domcontentloaded", timeout=60_000)
+            page.goto(print_url + "?" + urlencode(params), wait_until="commit", timeout=60_000)
             if self._on_login_page(page, operation):
                 self._wait_for_login(page, operation)
                 raise RuntimeError("打开工艺单页面时登录已失效，请重新运行。")
             actual_id = parse_qs(urlparse(page.url).query).get("bomtitleid", [None])[0]
             if actual_id != key:
                 raise RuntimeError(f"打开的工艺单与接口返回不一致（预期 {key}，实际 {actual_id}）。")
+            for attempt in range(3):
+                try:
+                    page.wait_for_function("() => !!document.querySelector('#app')?.__vue__", timeout=30_000)
+                    break
+                except PlaywrightTimeoutError as error:
+                    self.check_cancelled()
+                    if self._on_login_page(page, operation):
+                        self._wait_for_login(page, operation)
+                        raise RuntimeError("打印页面登录已失效，请重新运行。") from error
+                    if attempt == 2:
+                        raise RuntimeError("OA 打印页面脚本加载失败，重试后仍无法初始化。") from error
+                    self.update("opening", "OA 打印页面加载不完整，正在重试…", step="select")
+                    page.reload(wait_until="commit", timeout=60_000)
             self.check_cancelled()
             self.update("reading", f"正在保存第 {index+1} 份完整工艺单 PDF…", step="save_pdf")
             saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
@@ -1138,7 +1149,7 @@ class AutomationController:
         result = {}
         try:
             page = context.pages[0] if context.pages else context.new_page()
-            open_business_page(page, operation)
+            open_business_page(page, operation, wait_until="commit" if is_process_sheet(operation) else "domcontentloaded")
             page.wait_for_timeout(1_800)
             self.check_cancelled()
 
