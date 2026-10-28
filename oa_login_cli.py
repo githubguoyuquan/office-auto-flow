@@ -340,6 +340,24 @@ def is_process_sheet(operation: dict) -> bool:
     return url.path.lower().endswith("/plm/stylemanage/newstylemanage.html")
 
 
+def select_print_options(modal: Any) -> None:
+    items = modal.locator('.eachCheckbox input[type="checkbox"]')
+    if not items.count():
+        raise RuntimeError("打印弹窗中没有可用的打印项。")
+    modal.locator('input.checkAll').check()
+    others = modal.locator('.eachCheckbox input[type="checkbox"]:not([value="modifyRecord"])')
+    for index in range(others.count()):
+        if not others.nth(index).is_checked():
+            others.nth(index).check()
+    history = modal.locator('.eachCheckbox input[type="checkbox"][value="modifyRecord"]')
+    for index in range(history.count()):
+        history.nth(index).uncheck()
+    if modal.locator('.eachCheckbox input[type="checkbox"][value="modifyRecord"]:checked').count():
+        raise RuntimeError("未能取消修改记录，已停止打印。")
+    if modal.locator('.eachCheckbox input[type="checkbox"]:not([value="modifyRecord"]):not(:checked)').count():
+        raise RuntimeError("OA 未完成其他打印项勾选，已停止。")
+
+
 def open_business_page(page: Any, operation: dict) -> None:
     target = operation["url"]
     if (urlparse(target).path.lower().endswith("/login.html")
@@ -818,12 +836,7 @@ class AutomationController:
             page.locator('#processSheetPrint').click(timeout=15_000)
             modal = page.locator('#printModel')
             modal.wait_for(state="visible", timeout=15_000)
-            modal.locator('input.checkAll').check()
-            if not modal.locator('.eachCheckbox input[type="checkbox"]').count():
-                raise RuntimeError("打印弹窗中没有可用的打印项。")
-            unchecked = modal.locator('.eachCheckbox input[type="checkbox"]:not(:checked)').count()
-            if unchecked:
-                raise RuntimeError("OA 未完成全部打印项勾选，已停止。")
+            select_print_options(modal)
             self.check_cancelled()
             modal.locator('button.btn_tOPrint').click()
             page.wait_for_url("**/printAll.html?**", wait_until="domcontentloaded", timeout=60_000)
