@@ -1436,7 +1436,7 @@ PAGE_HTML = r'''<!doctype html>
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
-  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0];const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test($('styleCode').value.trim());return hasCodes&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
+  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim();if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
   function renderTimeline(item){
     const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF'],['convert','生成辅料 XLSX']]:[['open','打开业务页'],['read','读取页面内容']];
     const progress=item?.name===currentTask.operation?currentTask:{phase:'idle',step:'open',login_encountered:false};
@@ -1465,6 +1465,8 @@ PAGE_HTML = r'''<!doctype html>
   }
   async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
   $('searchInput').addEventListener('input',renderOperations);
+  $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())$('styleCodesFile').value=''});
+  $('styleCodesFile').addEventListener('change',()=>{if($('styleCodesFile').files.length)$('styleCode').value=''});
   for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,renderTask)}
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
@@ -1585,13 +1587,15 @@ class LocalHandler(BaseHTTPRequestHandler):
                     raise ValueError("业务操作不存在，请刷新页面。")
                 if is_process_sheet(operation):
                     batch_file = body.get("style_codes_file")
+                    style_code = str(body.get("style_code", "")).strip().upper()
+                    if batch_file is not None and style_code:
+                        raise ValueError("单个款号和批量 XLSX 不能同时提交，请选择其中一种。")
                     if batch_file is not None:
                         if not isinstance(batch_file, dict):
                             raise ValueError("批量款号文件数据无效。")
                         codes = read_style_codes(str(batch_file.get("filename", "")),
                                                  str(batch_file.get("content", "")))
                     else:
-                        style_code = str(body.get("style_code", "")).strip().upper()
                         if not re.fullmatch(r"[A-Z0-9_-]{1,80}", style_code):
                             raise ValueError("请输入有效款号或选择批量 XLSX 文件。")
                         codes = [style_code]
