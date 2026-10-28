@@ -20,7 +20,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, List
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 from trim_template import export_trim_xlsx
 
@@ -754,86 +754,115 @@ class AutomationController:
 
     def _print_process_sheets(self, context: Any, page: Any, operation: dict) -> dict:
         style_code = operation["style_code"]
-        printed = []
-        seen = set()
-        page_number, row_index = 1, 0
+        self._wait_for_process_sheet(page, operation)
+        self.check_cancelled()
+        self.update("reading", f"正在通过接口查询款号 {style_code}…", step="query")
+        config = page.evaluate("""() => {
+          const flags = {};
+          for (const input of document.querySelectorAll('#printModel .eachCheckbox input[type="checkbox"]')) {
+            flags[input.value] = true;
+          }
+          return {
+            base: new URL(SYS.Config.apiRoot, location.href).href,
+            defaults: SYS.Tool.serializeForm2Obj('#searchForm', true),
+            language: $.cookie('language') || 'zh-cn',
+            printLanguage: document.querySelector('#langu')?.value || 'zh-cn',
+            flags
+          };
+        }""")
+        if not config.get("flags"):
+            raise RuntimeError("OA 页面没有可用的打印项，已停止。")
+        page.evaluate("""({flags, language}) => {
+          $.cookie('printFlagObj', JSON.stringify(flags));
+          $.cookie('printLanguage', language);
+        }""", {"flags": config["flags"], "language": config["printLanguage"]})
+
+        def post_oa(path: str, data: dict) -> dict:
+            self.check_cancelled()
+            response = context.request.post(
+                urljoin(config["base"], path), data=data,
+                headers={"Content-Type": "application/json"}, timeout=60_000,
+            )
+            if response.status in (401, 403) or urlparse(response.url).path.lower().endswith("/login.html"):
+                if operation.get("batch_isolated"):
+                    operation["_batch_auth_failure"].set()
+                    operation["_batch_abort"].set()
+                raise RuntimeError("OA 登录已失效，接口请求被拒绝，请重新登录后运行。")
+            if not response.ok:
+                raise RuntimeError(f"OA 接口请求失败：HTTP {response.status}。")
+            try:
+                payload = response.json()
+            except Exception as error:
+                if operation.get("batch_isolated"):
+                    operation["_batch_auth_failure"].set()
+                    operation["_batch_abort"].set()
+                raise RuntimeError("OA 接口没有返回 JSON，可能需要重新登录。") from error
+            if not isinstance(payload, dict) or payload.get("code") != 10000:
+                message = payload.get("message", "响应格式异常") if isinstance(payload, dict) else "响应格式异常"
+                raise RuntimeError(f"OA 接口返回错误：{message}")
+            return payload
+
+        rows = []
+        page_number = 1
+        page_size = 999
         while True:
+            query = dict(config.get("defaults") or {}, styleCode=style_code,
+                         pageNum=page_number, pageSize=page_size, language=config["language"])
+            payload = post_oa("bomTitle/queryProcessSheet", query)
+            result = payload.get("data")
+            if not isinstance(result, dict) or not isinstance(result.get("list"), list):
+                raise RuntimeError("工艺单查询接口返回格式异常。")
+            batch = result["list"]
+            rows.extend(batch)
+            total_pages = result.get("pageCount")
+            try:
+                total_pages = int(total_pages) if total_pages is not None else None
+            except (TypeError, ValueError):
+                raise RuntimeError("工艺单查询接口返回了无效的页数。")
+            if not batch or (total_pages is not None and page_number >= total_pages):
+                break
+            if total_pages is None and len(batch) < page_size:
+                break
+            page_number += 1
+            if page_number > 200:
+                raise RuntimeError("工艺单查询页数超过上限，已停止。")
+
+        matching = [item for item in rows if isinstance(item, dict) and
+                    re.sub(r"\s+", "", str(item.get("styleCode", ""))).upper() == style_code]
+        if not matching:
+            samples = ", ".join(str(row.get("styleCode", "")) for row in rows[:5] if isinstance(row, dict))
+            raise RuntimeError(f"没有与款号 {style_code} 完全匹配的工艺单；返回款号示例：{samples}")
+        seen = set()
+        printed = []
+        print_url = urljoin(operation["url"], "printAll.html")
+        for index, item in enumerate(matching):
             self.check_cancelled()
-            self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…", step="query")
-            self._wait_for_process_sheet(page, operation)
-            self.update("reading", f"正在查询款号 {style_code}，已打开 {len(printed)} 份工艺单…", step="query")
-            page.locator('input[name="styleCode"].searchMatnr').fill(style_code)
-            # The click can issue two table requests; the first load event may
-            # belong to stale rows. Match this query and its rendered row IDs.
-            with page.expect_response(
-                lambda response: "bomTitle/queryProcessSheet" in response.url
-                and response.request.method == "POST"
-                and style_code.lower() in (response.request.post_data or "").lower(),
-                timeout=60_000,
-            ) as query_response:
-                page.locator('button.btn_searchStyle').click()
-            self.check_cancelled()
-            payload = query_response.value.json()
-            if payload.get("code") != 10000 or not isinstance(payload.get("data"), dict):
-                raise RuntimeError(f"工艺单查询失败：{payload.get('message', '响应格式异常')}")
-            response_rows = payload["data"].get("list") or []
-            if not response_rows:
-                raise RuntimeError(f"款号 {style_code} 未查询到工艺单。")
-            expected_ids = [str(row.get("bomTitleId")) for row in response_rows]
-            page.wait_for_function("""ids => {
-              const rows = jQuery('#tb_user').bootstrapTable('getData');
-              return rows.length === ids.length && rows.every((r, i) => String(r.bomTitleId) === ids[i]);
-            }""", arg=expected_ids, timeout=20_000)
-            page.evaluate("""() => { window.__aioaLoaded = false;
-              jQuery('#tb_user').one('load-success.bs.table', () => { window.__aioaLoaded = true; }); }""")
-            options = page.evaluate("() => {const o=jQuery('#tb_user').bootstrapTable('getOptions');return {page:o.pageNumber,total:o.totalRows,size:o.pageSize}}")
-            if options["page"] != page_number:
-                page.evaluate("n => jQuery('#tb_user').bootstrapTable('selectPage', n)", page_number)
-                page.wait_for_function("() => window.__aioaLoaded", timeout=60_000)
-            rows = page.evaluate("() => jQuery('#tb_user').bootstrapTable('getData').map(r => ({id:r.bomTitleId,style:r.styleCode,seq:r.seqNo}))")
-            if not rows:
-                raise RuntimeError(f"款号 {style_code} 未查询到工艺单。")
-            if row_index >= len(rows):
-                if page_number * int(options["size"]) >= int(options["total"]):
-                    break
-                page_number += 1
-                row_index = 0
-                continue
-            row = rows[row_index]
-            if re.sub(r"\s+", "", str(row["style"])).upper() != style_code:
-                row_index += 1
-                continue
-            key = str(row["id"])
-            if not row["id"] or key in seen:
-                raise RuntimeError("查询结果缺少唯一编号或发生变化，已停止以避免重复打印。")
-            self.check_cancelled()
-            self.check_cancelled()
-            self.update("reading", f"正在打开第 {len(printed)+1} 份工艺单（{style_code}，次数 {row['seq']}）…", step="select")
-            radio = page.locator(f'.fixed-table-body-columns input[name="parentItem"][data-index="{row_index}"]')
-            if not radio.count() or not radio.first.is_visible():
-                radio = page.locator(f'#tb_user input[name="parentItem"][data-index="{row_index}"]')
-            radio.first.check(timeout=15_000)
-            if not radio.first.is_checked():
-                raise RuntimeError(f"第 {row_index + 1} 行未被选中，已停止打印。")
-            page.locator('#processSheetPrint').click(timeout=15_000)
-            modal = page.locator('#printModel')
-            modal.wait_for(state="visible", timeout=15_000)
-            modal.locator('input.checkAll').check()
-            if not modal.locator('.eachCheckbox input[type="checkbox"]').count():
-                raise RuntimeError("打印弹窗中没有可用的打印项。")
-            unchecked = modal.locator('.eachCheckbox input[type="checkbox"]:not(:checked)').count()
-            if unchecked:
-                raise RuntimeError("OA 未完成全部打印项勾选，已停止。")
-            self.check_cancelled()
-            modal.locator('button.btn_tOPrint').click()
-            page.wait_for_url("**/printAll.html?**", wait_until="domcontentloaded", timeout=60_000)
+            key = str(item.get("bomTitleId") or "")
+            if not key or key in seen:
+                raise RuntimeError("查询结果缺少唯一编号或存在重复记录，已停止以避免重复打印。")
+            seen.add(key)
+            row = {"id": key, "style": item.get("styleCode", ""), "seq": item.get("seqNo", "")}
+            self.update("reading", f"正在获取第 {index+1} 份工艺单（{style_code}，次数 {row['seq']}）…", step="select")
+            detail = post_oa("bomTitle/printProcessSheet", {"bomTitleId": key}).get("data")
+            if not isinstance(detail, dict) or not isinstance(detail.get("bomTitle"), dict):
+                raise RuntimeError("工艺单明细接口返回格式异常。")
+            params = {"bomtitleid": key, "stylecode": row["style"], "printLangu": config["printLanguage"]}
+            for field in ("zzitemCd", "lgrop", "mgrop", "saiso", "saisj"):
+                params[field] = item.get(field) or ""
+            params["zzdsnno"] = item.get("zzdsnNo") or item.get("zzdsnno") or ""
+            if index:
+                page = context.new_page()
+            page.goto(print_url + "?" + urlencode(params), wait_until="domcontentloaded", timeout=60_000)
+            if self._on_login_page(page, operation):
+                self._wait_for_login(page, operation)
+                raise RuntimeError("打开工艺单页面时登录已失效，请重新运行。")
             actual_id = parse_qs(urlparse(page.url).query).get("bomtitleid", [None])[0]
             if actual_id != key:
-                raise RuntimeError(f"打开的工艺单与所选行不一致（预期 {key}，实际 {actual_id}）。")
+                raise RuntimeError(f"打开的工艺单与接口返回不一致（预期 {key}，实际 {actual_id}）。")
             self.check_cancelled()
-            self.update("reading", f"正在保存第 {len(printed)+1} 份完整工艺单 PDF…", step="save_pdf")
+            self.update("reading", f"正在保存第 {index+1} 份完整工艺单 PDF…", step="save_pdf")
             saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
-            self.update("reading", f"正在转换第 {len(printed)+1} 份辅料信息 XLSX…", step="convert")
+            self.update("reading", f"正在转换第 {index+1} 份辅料信息 XLSX…", step="convert")
             template_id = operation["print_settings"]["template_id"]
             template_path = data_dir() / "templates" / f"{template_id}.xlsx"
             converted_dir = output_directory(operation["print_settings"]["converted_dir"])
@@ -843,27 +872,13 @@ class AutomationController:
                 converted_xlsx = converted_dir / f"{saved_pdf.stem}_辅料信息_{version}.xlsx"
                 version += 1
             try:
-                official_style = page.evaluate("""() =>
-                  document.querySelector('#app')?.__vue__?.bomTitle?.style_code || ''""")
-                conversion = export_trim_xlsx(
-                    template_path, trim_tables, converted_xlsx,
-                    shared_fields={"正式款号": str(official_style or row["style"]).strip()},
-                )
+                official_style = detail["bomTitle"].get("style_code") or row["style"]
+                conversion = export_trim_xlsx(template_path, trim_tables, converted_xlsx,
+                                              shared_fields={"正式款号": str(official_style).strip()})
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
-            seen.add(key)
             printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
-            row_index += 1
-            # Keep each native print page alive; use another tab for the next row.
-            self.update("opening", "正在打开下一份工艺单列表…", step="open")
-            page = context.new_page()
-            open_business_page(page, operation)
-        page.close()
-        if not printed:
-            samples = ", ".join(str(row.get("styleCode", "")) for row in response_rows[:5])
-            raise RuntimeError(f"查询返回了记录，但没有与款号 {style_code} 完全匹配的工艺单；返回款号示例：{samples}")
-        result = {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
-        return result
+        return {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
 
     def _worker_loop(self) -> None:
         context = None
@@ -1356,7 +1371,7 @@ PAGE_HTML = r'''<!doctype html>
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
   function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0];const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test($('styleCode').value.trim());return hasCodes&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
   function renderTimeline(item){
-    const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','选择并打印'],['save_pdf','保存完整 PDF'],['convert','生成辅料 XLSX']]:[['open','打开业务页'],['read','读取页面内容']];
+    const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF'],['convert','生成辅料 XLSX']]:[['open','打开业务页'],['read','读取页面内容']];
     const progress=item?.name===currentTask.operation?currentTask:{phase:'idle',step:'open',login_encountered:false};
     if(progress.login_encountered)steps.splice(1,0,['login','完成登录']);
     const index=Math.max(0,steps.findIndex(([key])=>key===(progress.step||'open')));
