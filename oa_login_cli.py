@@ -41,7 +41,7 @@ LOGIN_COOKIE_NAMES = frozenset({
 FIXED_BUSINESS_OPERATION = {
     "name": "工艺单打印",
     "url": "http://noah.vgrass.com:8088/activiti/html/plm/styleManage/newStyleManage.html#9fdd2c3cfd7941b1bb1dadd4421360ba",
-    "description": "输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。",
+    "description": "输入款号并保存完整工艺单 PDF，可选择模板生成辅料 XLSX。",
 }
 CONFIG_LOCK = threading.Lock()
 DIRECTORY_PICKER_LOCK = threading.Lock()
@@ -415,7 +415,9 @@ def save_process_sheet_pdf(context: Any, page: Any, operation: dict, row: dict) 
       const cells = section ? [...section.querySelectorAll('td.eachLie')] : [];
       return cells.length > 0 && cells.every(cell => !cell.textContent.includes('{{'));
     }""", timeout=60_000)
-    trim_tables = page.locator("#fcl").evaluate("""element => {
+    trim_tables = []
+    if operation["print_settings"].get("template_id"):
+        trim_tables = page.locator("#fcl").evaluate("""element => {
       const sections = [element];
       // OA renders the second and remainder material pages as sibling sections.
       for (let next = element.nextElementSibling;
@@ -463,6 +465,8 @@ def save_process_sheet_pdf(context: Any, page: Any, operation: dict, row: dict) 
         if temporary.exists():
             temporary.unlink()
 
+    if not operation["print_settings"].get("template_id"):
+        return destination, None, trim_tables
     source_dir = data_dir() / "trim-sources"
     source_dir.mkdir(parents=True, exist_ok=True)
     source = source_dir / f"{hashlib.sha256(str(destination).encode()).hexdigest()[:20]}.json"
@@ -916,8 +920,11 @@ class AutomationController:
             self.check_cancelled()
             self.update("reading", f"正在保存第 {index+1} 份完整工艺单 PDF…", step="save_pdf")
             saved_pdf, trim_source, trim_tables = save_process_sheet_pdf(context, page, operation, row)
+            template_id = operation["print_settings"].get("template_id", "")
+            if not template_id:
+                printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；未选择模板，未生成辅料 XLSX")
+                continue
             self.update("reading", f"正在转换第 {index+1} 份辅料信息 XLSX…", step="convert")
-            template_id = operation["print_settings"]["template_id"]
             template_path = data_dir() / "templates" / f"{template_id}.xlsx"
             converted_dir = output_directory(operation["print_settings"]["converted_dir"])
             converted_xlsx = converted_dir / f"{saved_pdf.stem}_辅料信息.xlsx"
@@ -1027,7 +1034,7 @@ class AutomationController:
             completed = len(results)
             lines = [f"{code}：{results[code].get('content') or results[code].get('message', results[code]['phase'])}"
                      if code in results else f"{code}：未执行" for code in codes]
-            self.update(phase, message, step="convert", title=f"工艺单批量打印（{len(codes)} 个款号）",
+            self.update(phase, message, step="convert" if operation["print_settings"].get("template_id") else "save_pdf", title=f"工艺单批量打印（{len(codes)} 个款号）",
                         url=operation["url"], content="\n".join(lines),
                         batch_total=len(codes), batch_completed=completed)
 
@@ -1167,7 +1174,7 @@ class AutomationController:
                                 stop_all("并发窗口的 OA 登录已失效，已停止后续款号。", True)
                             elif not batch_abort.is_set() and not self.cancel_event.is_set():
                                 self.update("reading", f"批量进度 {completed}/{len(codes)}；最近完成：{code}（{result['phase']}）",
-                                            step="convert" if result["phase"] == "done" else "query",
+                                            step=("convert" if operation["print_settings"].get("template_id") else "save_pdf") if result["phase"] == "done" else "query",
                                             batch_total=len(codes), batch_completed=completed)
                     except Exception as error:
                         if not batch_abort.is_set() and not self.cancel_event.is_set():
@@ -1228,7 +1235,9 @@ class AutomationController:
             if is_process_sheet(operation):
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
-                final_message = "完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
+                final_message = ("完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
+                                 if operation["print_settings"].get("template_id")
+                                 else "完整工艺单 PDF 已保存；未选择模板，未生成辅料 XLSX。")
             else:
                 self.update("reading", "正在读取业务页面主要内容…", step="read")
                 result = {
@@ -1408,10 +1417,10 @@ PAGE_HTML = r'''<!doctype html>
   const $ = id => document.getElementById(id);
   const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
   printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号（单个）</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"><label class="field-label" for="styleCodesFile" style="margin-top:12px">或上传批量款号 XLSX（第一列每行一个，不含表头）</label><input class="field" id="styleCodesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
-    <div class="print-config"><label class="field-label" for="templateHistory">辅料格式模板（XLSX）</label><div class="picker-row"><select class="field" id="templateHistory"></select><button type="button" class="ghost" id="uploadTemplate">上传模板</button></div><input id="templateFile" type="file" hidden accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
+    <div class="print-config"><label class="field-label" for="templateHistory">辅料格式模板（XLSX，可选）</label><div class="picker-row"><select class="field" id="templateHistory"></select><button type="button" class="ghost" id="uploadTemplate">上传模板</button></div><input id="templateFile" type="file" hidden accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
     <div class="print-config"><label class="field-label" for="originalDir">完整工艺单 PDF 保存目录</label><div class="picker-row"><input class="field" id="originalDir" list="originalHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseOriginalDir">选择文件夹</button></div><datalist id="originalHistory"></datalist></div>
-    <div class="print-config"><label class="field-label" for="convertedDir">辅料转换 XLSX 保存目录</label><div class="picker-row"><input class="field" id="convertedDir" list="convertedHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseConvertedDir">选择文件夹</button></div><datalist id="convertedHistory"></datalist></div>
-    <p class="panel-sub">默认使用上次的目录和模板；可从历史目录或模板列表中切换。</p>`;
+    <div class="print-config"><label class="field-label" for="convertedDir">辅料转换 XLSX 保存目录（选择模板时必填）</label><div class="picker-row"><input class="field" id="convertedDir" list="convertedHistory" placeholder="请选择文件夹或历史目录"><button type="button" class="ghost" id="chooseConvertedDir">选择文件夹</button></div><datalist id="convertedHistory"></datalist></div>
+    <p class="panel-sub">未选择模板时只保存 PDF；选择模板后将同时生成辅料 XLSX。</p>`;
   document.querySelector('.run-actions').before(printFields);
   let choosingDirectory=false;
   $('uploadTemplate').addEventListener('click',()=>$('templateFile').click());
@@ -1429,7 +1438,7 @@ PAGE_HTML = r'''<!doctype html>
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&settingsModal.classList.contains('open'))$('closeSettings').click()});
   $('settingsForm').onsubmit=async event=>{event.preventDefault();try{await api('/api/settings','POST',{login_url:$('systemLoginUrl').value.trim()});$('closeSettings').click();await refresh();toast('系统设置已保存')}catch(error){toast(error.message)}};
   let operations = [], selectedName = '', currentTask = {phase:'idle'}, toastTimer, printSettingsInitialized = false, lastPrintSettingsKey = '';
-  function syncPrintSettings(settings){if(!settings)return;const key=JSON.stringify([settings.original_history,settings.converted_history,settings.templates,settings.template_id]);if(printSettingsInitialized&&key===lastPrintSettingsKey)return;lastPrintSettingsKey=key;if(!printSettingsInitialized){$('originalDir').value=settings.original_dir||'';$('convertedDir').value=settings.converted_dir||'';printSettingsInitialized=true}for(const [name,values] of [['originalHistory',settings.original_history],['convertedHistory',settings.converted_history]]){const list=$(name);list.replaceChildren();for(const value of values||[]){const option=document.createElement('option');option.value=value;list.append(option)}}const select=$('templateHistory'),before=select.value;select.replaceChildren();const empty=document.createElement('option');empty.value='';empty.textContent='请选择或上传 XLSX 模板';select.append(empty);for(const item of settings.templates||[]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name+' · '+item.uploaded_at;select.append(option)}select.value=before&&[...select.options].some(o=>o.value===before)?before:(settings.template_id||'')}
+  function syncPrintSettings(settings){if(!settings)return;const key=JSON.stringify([settings.original_history,settings.converted_history,settings.templates,settings.template_id]);if(printSettingsInitialized&&key===lastPrintSettingsKey)return;lastPrintSettingsKey=key;if(!printSettingsInitialized){$('originalDir').value=settings.original_dir||'';$('convertedDir').value=settings.converted_dir||'';printSettingsInitialized=true}for(const [name,values] of [['originalHistory',settings.original_history],['convertedHistory',settings.converted_history]]){const list=$(name);list.replaceChildren();for(const value of values||[]){const option=document.createElement('option');option.value=value;list.append(option)}}const select=$('templateHistory'),before=select.value,hadOptions=select.options.length>0;select.replaceChildren();const empty=document.createElement('option');empty.value='';empty.textContent='不转换辅料（仅保存 PDF）';select.append(empty);for(const item of settings.templates||[]){const option=document.createElement('option');option.value=item.id;option.textContent=item.name+' · '+item.uploaded_at;select.append(option)}select.value=hadOptions&&[...select.options].some(o=>o.value===before)?before:(settings.template_id||'')}
   $('templateFile').addEventListener('change',async()=>{const file=$('templateFile').files[0];if(!file)return;if(file.size>5*1024*1024){toast('模板不能超过 5 MB');return}try{const content=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('模板读取失败'));reader.readAsDataURL(file)});const data=await api('/api/template','POST',{filename:file.name,content});await refresh();$('templateHistory').value=data.template.id;toast('模板已保存，下次默认使用')}catch(error){toast(error.message)}});
   const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
   const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
@@ -1437,9 +1446,10 @@ PAGE_HTML = r'''<!doctype html>
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
-  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim();if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&!!$('convertedDir').value.trim()&&!!$('templateHistory').value}
+  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
   function renderTimeline(item){
-    const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF'],['convert','生成辅料 XLSX']]:[['open','打开业务页'],['read','读取页面内容']];
+    const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF']]:[['open','打开业务页'],['read','读取页面内容']];
+    if(isPrintOperation(item)&&$('templateHistory').value)steps.push(['convert','生成辅料 XLSX']);
     const progress=item?.name===currentTask.operation?currentTask:{phase:'idle',step:'open',login_encountered:false};
     if(progress.login_encountered)steps.splice(1,0,['login','完成登录']);
     const index=Math.max(0,steps.findIndex(([key])=>key===(progress.step||'open')));
@@ -1456,6 +1466,8 @@ PAGE_HTML = r'''<!doctype html>
   function renderTask(){
     $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
     for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
+    $('convertedDir').disabled=runningPhases.has(currentTask.phase)||!$('templateHistory').value;
+    $('chooseConvertedDir').disabled=choosingDirectory||runningPhases.has(currentTask.phase)||!$('templateHistory').value;
     const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=businessDescription(chosen);$('composerCopy').append(hint);
     document.querySelector('.page-title').textContent=chosen?chosen.name:'选择业务操作';document.querySelector('.page-desc').textContent=businessDescription(chosen);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
@@ -1552,11 +1564,15 @@ class LocalHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/print-settings":
                 with CONFIG_LOCK:
                     settings = load_print_settings()
-                    remember_directory(settings, "original_dir", str(body.get("original_dir", "")))
-                    remember_directory(settings, "converted_dir", str(body.get("converted_dir", "")))
-                    template_id = str(body.get("template_id", ""))
+                    template_id = str(body.get("template_id", "")).strip()
                     if template_id and not any(item["id"] == template_id for item in settings["templates"]):
                         raise ValueError("模板不存在，请重新上传。")
+                    converted_dir = str(body.get("converted_dir", "")).strip()
+                    if template_id and not converted_dir:
+                        raise ValueError("选择辅料模板后，请设置辅料 XLSX 保存目录。")
+                    remember_directory(settings, "original_dir", str(body.get("original_dir", "")))
+                    if template_id:
+                        remember_directory(settings, "converted_dir", converted_dir)
                     settings["template_id"] = template_id
                     save_print_settings(settings)
                 self._send(200, {"ok": True})
@@ -1605,10 +1621,10 @@ class LocalHandler(BaseHTTPRequestHandler):
                         operation["style_code"] = codes[0]
                     with CONFIG_LOCK:
                         print_settings = load_print_settings()
-                    if not print_settings["original_dir"] or not print_settings["converted_dir"]:
-                        raise ValueError("请先设置完整工艺单与辅料表格的保存目录。")
-                    if not print_settings["template_id"]:
-                        raise ValueError("请先上传 XLSX 模板。")
+                    if not print_settings["original_dir"]:
+                        raise ValueError("请先设置完整工艺单 PDF 保存目录。")
+                    if print_settings["template_id"] and not print_settings["converted_dir"]:
+                        raise ValueError("选择辅料模板后，请设置辅料 XLSX 保存目录。")
                     operation["print_settings"] = print_settings
                 CONTROLLER.start(operation)
                 self._send(200, {"ok": True})
