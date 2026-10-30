@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, List
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
-from trim_template import export_trim_xlsx
+from trim_template import _records, export_trim_xlsx
 
 
 APP_NAME = "oa-login-cli"
@@ -924,6 +924,15 @@ class AutomationController:
             if not template_id:
                 printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；未选择模板，未生成辅料 XLSX")
                 continue
+            official_style = str(detail["bomTitle"].get("style_code") or row["style"]).strip()
+            if operation.get("_batch_trim") is not None:
+                records = _records(trim_tables, {"正式款号": official_style})
+                if not records:
+                    raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；OA 打印页的辅料信息表没有可转换的数据。")
+                with operation["_batch_trim_lock"]:
+                    operation["_batch_trim"].append((style_code, index, records))
+                printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料信息待批量汇总（{len(records)} 条）")
+                continue
             self.update("reading", f"正在转换第 {index+1} 份辅料信息 XLSX…", step="convert")
             template_path = data_dir() / "templates" / f"{template_id}.xlsx"
             converted_dir = output_directory(operation["print_settings"]["converted_dir"])
@@ -933,9 +942,8 @@ class AutomationController:
                 converted_xlsx = converted_dir / f"{saved_pdf.stem}_辅料信息_{version}.xlsx"
                 version += 1
             try:
-                official_style = detail["bomTitle"].get("style_code") or row["style"]
                 conversion = export_trim_xlsx(template_path, trim_tables, converted_xlsx,
-                                              shared_fields={"正式款号": str(official_style).strip()})
+                                              shared_fields={"正式款号": official_style})
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
@@ -1029,11 +1037,34 @@ class AutomationController:
             )
 
         results = {}
+        operation = dict(operation, _batch_trim=[], _batch_trim_lock=threading.Lock())
 
         def finish(phase: str, message: str) -> None:
             completed = len(results)
             lines = [f"{code}：{results[code].get('content') or results[code].get('message', results[code]['phase'])}"
                      if code in results else f"{code}：未执行" for code in codes]
+            if operation["_batch_trim"]:
+                try:
+                    self.update("reading", "正在汇总已完成款号的辅料信息…", step="convert")
+                    order = {code: index for index, code in enumerate(codes)}
+                    groups = sorted(operation["_batch_trim"], key=lambda item: (order[item[0]], item[1]))
+                    records = [record for _, _, group in groups for record in group]
+                    fields = list(dict.fromkeys(field for record in records for field in record))
+                    table = [[field] + [record.get(field, "") for record in records] for field in fields]
+                    directory = output_directory(operation["print_settings"]["converted_dir"])
+                    stem = f"批量辅料信息_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+                    destination = directory / f"{stem}.xlsx"
+                    version = 2
+                    while destination.exists():
+                        destination = directory / f"{stem}_{version}.xlsx"
+                        version += 1
+                    template = data_dir() / "templates" / f"{operation['print_settings']['template_id']}.xlsx"
+                    conversion = export_trim_xlsx(template, [table], destination)
+                    lines.append(f"辅料汇总 XLSX：{destination}（{conversion['rows']} 条）")
+                    message += " 已生成辅料汇总文件。"
+                except Exception as error:
+                    phase = "error" if phase != "cancelled" else phase
+                    message += f" 辅料汇总失败：{error}"
             self.update(phase, message, step="convert" if operation["print_settings"].get("template_id") else "save_pdf", title=f"工艺单批量打印（{len(codes)} 个款号）",
                         url=operation["url"], content="\n".join(lines),
                         batch_total=len(codes), batch_completed=completed)
@@ -1235,7 +1266,9 @@ class AutomationController:
             if is_process_sheet(operation):
                 result = self._print_process_sheets(context, page, operation)
                 final_phase = "done"
-                final_message = ("完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
+                final_message = ("完整工艺单 PDF 已保存，辅料信息等待批量汇总。"
+                                 if operation.get("_batch_trim") is not None and operation["print_settings"].get("template_id")
+                                 else "完整工艺单 PDF 与辅料信息 XLSX 已保存，请检查文件内容。"
                                  if operation["print_settings"].get("template_id")
                                  else "完整工艺单 PDF 已保存；未选择模板，未生成辅料 XLSX。")
             else:
