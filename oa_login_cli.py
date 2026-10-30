@@ -629,6 +629,8 @@ class AutomationController:
 
     def start(self, operation: dict) -> None:
         with self.lock:
+            if self.shutdown_event.is_set():
+                raise ValueError("工作台正在退出，无法启动新任务。")
             if self.task_active:
                 raise ValueError("已有任务正在运行，请先等待或停止。")
             self.messages = queue.Queue()
@@ -668,6 +670,14 @@ class AutomationController:
             self.cancel_event.set()
         self.messages.put(("cancel",))
         self.update("stopping", "正在停止任务…")
+
+    def shutdown(self) -> None:
+        with self.lock:
+            self.shutdown_event.set()
+            self.cancel_event.set()
+        self.messages.put(("cancel",))
+        if self.worker and self.worker is not threading.current_thread():
+            self.worker.join()
 
     def check_cancelled(self) -> None:
         batch_abort = getattr(self.batch_local, "abort", None)
@@ -1447,6 +1457,7 @@ PAGE_HTML = r'''<!doctype html>
   function updateThemeButton(){const dark=document.documentElement.dataset.theme==='dark';themeButton.textContent=dark?'☀ 浅色':'☾ 深色';themeButton.setAttribute('aria-label',dark?'切换到浅色模式':'切换到深色模式')}
   themeButton.addEventListener('click',()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;document.cookie='aioa-theme='+next+'; Path=/; Max-Age=31536000; SameSite=Strict';updateThemeButton()});
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
+  let exiting=false;const exitButton=document.createElement('button');exitButton.type='button';exitButton.className='theme-toggle';exitButton.id='exitWorkbench';exitButton.textContent='退出工作台';document.querySelector('.top-right').append(exitButton);
   const $ = id => document.getElementById(id);
   const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
   printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号（单个）</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"><label class="field-label" for="styleCodesFile" style="margin-top:12px">或上传批量款号 XLSX（第一列每行一个，不含表头）</label><input class="field" id="styleCodesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
@@ -1497,6 +1508,7 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderDetail(){const item=selected();const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
+    exitButton.disabled=choosingDirectory||exiting;
     $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
     for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
     $('convertedDir').disabled=runningPhases.has(currentTask.phase)||!$('templateHistory').value;
@@ -1517,7 +1529,9 @@ PAGE_HTML = r'''<!doctype html>
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
-  refresh();setInterval(refresh,1300);
+  const refreshTimer=setInterval(refresh,1300);
+  exitButton.addEventListener('click',async()=>{if(runningPhases.has(currentTask.phase)&&!confirm('当前任务正在运行，退出会停止任务。确定退出工作台吗？'))return;exiting=true;exitButton.disabled=true;exitButton.textContent='正在退出…';try{await api('/api/shutdown','POST',{});clearInterval(refreshTimer);$('statusMessage').textContent='正在停止任务并关闭自动化浏览器，请稍候…';$('runButton').disabled=true;$('stopButton').disabled=true;const timer=setInterval(async()=>{try{await api('/api/state')}catch(_){clearInterval(timer);$('statusMessage').textContent='工作台服务已停止，可以关闭此页面。';exitButton.textContent='工作台已退出'}},1000)}catch(error){exiting=false;exitButton.disabled=false;exitButton.textContent='退出工作台';toast(error.message)}});
+  refresh();
 </script>
 </body>
 </html>'''
@@ -1667,6 +1681,12 @@ class LocalHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/stop":
                 CONTROLLER.stop()
                 self._send(200, {"ok": True})
+            elif self.path == "/api/shutdown":
+                def finish_shutdown() -> None:
+                    CONTROLLER.shutdown()
+                    self.server.shutdown()
+                self._send(200, {"ok": True})
+                threading.Thread(target=finish_shutdown, daemon=True).start()
             else:
                 self._send(404, {"error": "接口不存在。"})
         except (ValueError, json.JSONDecodeError) as error:
@@ -1699,8 +1719,7 @@ def run() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        CONTROLLER.cancel_event.set()
-        CONTROLLER.shutdown_event.set()
+        CONTROLLER.shutdown()
         server.server_close()
     return 0
 
