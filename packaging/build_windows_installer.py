@@ -37,6 +37,7 @@ def update_user_guide(path: Path) -> None:
 4. 工作台默认使用深色界面，可通过右上角按钮切换浅色或深色，选择会被记住。
 5. 如果提示端口已被占用，先关闭之前启动的工作台，再重新打开桌面图标。
 6. 可在 Windows“设置 → 应用”或开始菜单中卸载。卸载会保留工作台配置、浏览器会话和导出文件。
+7. 更新安装前，请先关闭工作台及其命令窗口。若仍提示文件无法写入，请联系 IT 检查目录权限或安全软件占用。
 
 """
     path.write_text(text[:start] + install_steps + text[end:], encoding="utf-8")
@@ -96,6 +97,12 @@ Function .onInit
 FunctionEnd
 
 Section "安装工作台" SEC_MAIN
+  # Check the two files most likely to be locked by a running workbench before
+  # extracting anything, so an update does not leave a partial installation.
+  StrCpy $R1 "$INSTDIR\\runtime\\python.exe"
+  Call CheckWritableRuntime
+  StrCpy $R1 "$INSTDIR\\runtime\\_asyncio.pyd"
+  Call CheckWritableRuntime
   SetOutPath "$INSTDIR"
   SetOverwrite on
   File /r "{payload_path}/*"
@@ -112,6 +119,19 @@ Section "安装工作台" SEC_MAIN
   WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowAPI" "NoModify" 1
   WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\OfficeAutoFlowAPI" "NoRepair" 1
 SectionEnd
+
+Function CheckWritableRuntime
+  IfFileExists "$R1" 0 writable_done
+writable_retry:
+  System::Call 'kernel32::CreateFileW(w "$R1", i 0x40000000, i 0, p 0, i 3, i 0x80, p 0) p .r0'
+  StrCmp $0 -1 writable_blocked
+  System::Call 'kernel32::CloseHandle(p r0)'
+  Goto writable_done
+writable_blocked:
+  MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "无法写入已有的工作台文件：$R1$\\r$\\n请关闭工作台和黑色命令窗口后选择重试。若仍失败，请检查目录权限或安全软件是否占用。" IDRETRY writable_retry
+  Abort
+writable_done:
+FunctionEnd
 
 Function un.onInit
   SetShellVarContext current
