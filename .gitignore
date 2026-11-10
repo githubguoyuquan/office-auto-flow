@@ -1,0 +1,9 @@
+/preview/
+/packaging/.build-venv/
+__pycache__/
+*.pyc
+*.pem
+AIOA-签发密钥备份*.zip
+*.license
+/public-keys.json
+/.secrets/

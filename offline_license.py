@@ -141,7 +141,17 @@ class _NoRedirect(HTTPRedirectHandler):
 def _https_timestamp(url: str) -> float:
     if urlsplit(url).scheme != "https":
         raise LicenseError("时间源必须使用 HTTPS。")
-    opener = build_opener(HTTPSHandler(context=ssl.create_default_context()), _NoRedirect())
+    import certifi
+    # Use the standalone bundle directly: importlib.resources-based certifi.where
+    # may resolve the build-time path after native compilation.
+    bundles = [Path(sys.argv[0]).resolve().parent / "certifi" / "cacert.pem",
+               Path(__file__).resolve().parent / "certifi" / "cacert.pem",
+               Path(sys.executable).resolve().parent / "certifi" / "cacert.pem"]
+    bundled = next((path for path in bundles if path.is_file()), None)
+    certificates = bundled.read_text(encoding="ascii") if bundled else certifi.contents()
+    context = ssl.create_default_context(cadata=certificates)
+    context.load_default_certs()
+    opener = build_opener(HTTPSHandler(context=context), _NoRedirect())
     request = Request(url + "?aioa_time=" + secrets.token_hex(12), method="HEAD",
                       headers={"Cache-Control": "no-cache, no-store", "User-Agent": "AIOA-TimeCheck/1"})
     with opener.open(request, timeout=5) as response:
@@ -156,20 +166,23 @@ def _https_timestamp(url: str) -> float:
 def fetch_network_time() -> float:
     """Require two different HTTPS hosts agreeing within two minutes."""
     readings = []
+    failures = []
     with ThreadPoolExecutor(max_workers=len(TIME_SOURCES)) as pool:
-        futures = [pool.submit(_https_timestamp, url) for url in TIME_SOURCES]
+        futures = {pool.submit(_https_timestamp, url): url for url in TIME_SOURCES}
         for future in as_completed(futures):
             try:
                 timestamp = future.result()
                 if timestamp > 0:
                     readings.append(timestamp)
-            except Exception:
+            except Exception as error:
+                failures.append(f"{urlsplit(futures[future]).hostname}: {type(error).__name__}")
                 continue
     groups = [[other for other in readings if reading <= other <= reading + TIME_SKEW]
               for reading in readings]
     agreement = max(groups, key=len, default=[])
     if len(agreement) < 2:
-        raise LicenseError("联网时间校验失败，请检查网络、系统时间或代理设置后重试。")
+        detail = "；".join(failures) if failures else "时间源返回的时间不一致"
+        raise LicenseError(f"联网时间校验失败，请检查网络、系统时间或代理设置后重试。（{detail}）")
     return max(agreement)
 
 
@@ -201,6 +214,19 @@ class TrustedClock:
                 trusted = max(trusted, self._last or trusted)
                 self._anchor = (trusted, self._monotonic(), self._wall_time())
                 elapsed = 0
+            current = self._anchor[0] + elapsed
+            self._last = max(current, self._last or current)
+            return self._last
+
+    def cached_now(self) -> float:
+        """Inspect an existing fresh anchor without triggering network requests."""
+        with self._lock:
+            if self._anchor is None:
+                raise LicenseError("需要联网校验时间。")
+            elapsed = self._monotonic() - self._anchor[1]
+            drift = abs((self._wall_time() - self._anchor[2]) - elapsed)
+            if elapsed < 0 or elapsed >= TIME_CHECK_INTERVAL or drift > TIME_SKEW:
+                raise LicenseError("需要重新联网校验时间。")
             current = self._anchor[0] + elapsed
             self._last = max(current, self._last or current)
             return self._last

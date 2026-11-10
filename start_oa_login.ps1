@@ -77,6 +77,14 @@ if (-not (Test-Path -LiteralPath $openpyxlModule -PathType Container)) {
 
 Write-Host "Starting OA Login CLI..." -ForegroundColor Green
 $ErrorActionPreference = "Continue"
+& $venvPython -c "import cryptography, certifi" *> $null
+$cryptoExitCode = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
+if ($cryptoExitCode -ne 0) {
+    & $venvPython -m pip install --disable-pip-version-check "cryptography==50.0.2" certifi
+    if ($LASTEXITCODE -ne 0) { Stop-WithMessage "Failed to install license verification support." }
+}
+$ErrorActionPreference = "Continue"
 & $venvPython $appScript
 $appExitCode = $LASTEXITCODE
 $ErrorActionPreference = "Stop"

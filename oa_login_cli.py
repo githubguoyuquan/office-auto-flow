@@ -23,6 +23,7 @@ from typing import Any, List
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 from trim_template import _records, export_trim_xlsx
+from license_manager import LicenseManager
 
 
 APP_NAME = "oa-login-cli"
@@ -628,6 +629,7 @@ class AutomationController:
             )
 
     def start(self, operation: dict) -> None:
+        LICENSES.require_valid()
         with self.lock:
             if self.shutdown_event.is_set():
                 raise ValueError("工作台正在退出，无法启动新任务。")
@@ -1459,6 +1461,15 @@ PAGE_HTML = r'''<!doctype html>
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   let exiting=false;const exitButton=document.createElement('button');exitButton.type='button';exitButton.className='theme-toggle';exitButton.id='exitWorkbench';exitButton.textContent='退出工作台';document.querySelector('.top-right').append(exitButton);
   const $ = id => document.getElementById(id);
+  let licenseState={valid:false},licenseChecking=false,licenseAutoAttempted=false;
+  const licenseButton=document.createElement('button');licenseButton.type='button';licenseButton.className='theme-toggle';licenseButton.id='licenseButton';licenseButton.textContent='授权管理';document.querySelector('.top-right').prepend(licenseButton);
+  const licenseModal=document.createElement('div');licenseModal.className='modal-backdrop';licenseModal.id='licenseModal';licenseModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="licenseTitle"><div class="modal-top"><h3 id="licenseTitle">软件授权</h3><button class="ghost" id="closeLicense" type="button">关闭</button></div><p id="licenseMessage" role="status"></p><label class="field-label">设备码</label><input id="licenseDevice" class="field" readonly><p id="licenseDetails" class="panel-sub"></p><div class="modal-actions" style="flex-wrap:wrap"><button id="exportRequest" class="ghost" type="button">导出设备申请</button><button id="checkLicense" class="ghost" type="button">联网校验</button><button id="importLicense" class="primary" type="button">导入授权文件</button></div><input id="licenseFile" type="file" accept=".license,application/json" hidden><p class="panel-sub">首次激活、工作台重启后及每隔 24 小时需要联网校时。当前任务可执行完成；到期后无法开始新任务。</p></section>`;document.body.append(licenseModal);
+  function renderLicense(){licenseButton.textContent=licenseState.valid?'授权有效':'授权管理';$('licenseMessage').textContent=licenseChecking?'正在联网校验时间…':licenseState.message||'尚未授权';$('licenseDevice').value=licenseState.device_id||'';$('licenseDetails').textContent=licenseState.expires_at?'授权到期：'+new Date(licenseState.expires_at).toLocaleString('zh-CN')+(licenseState.valid?' · 剩余 '+Math.ceil(licenseState.remaining_seconds/86400)+' 天':'')+(licenseState.customer?' · '+licenseState.customer:''):'';$('checkLicense').disabled=licenseChecking;$('importLicense').disabled=licenseChecking||runningPhases.has(currentTask.phase)}
+  licenseButton.onclick=()=>{renderLicense();licenseModal.classList.add('open')};$('closeLicense').onclick=()=>licenseModal.classList.remove('open');
+  async function checkLicense(){if(licenseChecking)return;licenseChecking=true;renderLicense();try{const result=await api('/api/license/check','POST',{});licenseState=result.license}catch(error){licenseState={...licenseState,valid:false,message:error.message};toast(error.message)}finally{licenseChecking=false;renderLicense();renderTask()}}
+  $('checkLicense').onclick=checkLicense;
+  $('exportRequest').onclick=async()=>{try{const data=await api('/api/license/request','POST',{});const url=URL.createObjectURL(new Blob([JSON.stringify(data.request,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download='AIOA-设备申请.json';link.click();setTimeout(()=>URL.revokeObjectURL(url),10000)}catch(error){toast(error.message)}};
+  $('importLicense').onclick=()=>$('licenseFile').click();$('licenseFile').onchange=async()=>{const file=$('licenseFile').files[0];if(!file)return;try{if(file.size>65536)throw Error('授权文件过大');licenseChecking=true;renderLicense();const result=await api('/api/license/import','POST',{document:await file.text()});licenseState=result.license;licenseAutoAttempted=false;toast('授权导入成功')}catch(error){toast(error.message)}finally{licenseChecking=false;$('licenseFile').value='';renderLicense();renderTask()}};
   const printFields=document.createElement('div');printFields.id='printFields';printFields.hidden=true;
   printFields.innerHTML=`<div class="print-config"><label class="field-label" for="styleCode">工艺单款号（单个）</label><input class="field" id="styleCode" maxlength="80" placeholder="例如：TTOW27A24B220B"><label class="field-label" for="styleCodesFile" style="margin-top:12px">或上传批量款号 XLSX（第一列每行一个，不含表头）</label><input class="field" id="styleCodesFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
     <div class="print-config"><label class="field-label" for="templateHistory">辅料格式模板（XLSX，可选）</label><div class="picker-row"><select class="field" id="templateHistory"></select><button type="button" class="ghost" id="uploadTemplate">上传模板</button></div><input id="templateFile" type="file" hidden accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"></div>
@@ -1490,7 +1501,7 @@ PAGE_HTML = r'''<!doctype html>
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
-  function canRun(item){if(!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
+  function canRun(item){if(!licenseState.valid||licenseChecking||exiting||!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
   function renderTimeline(item){
     const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF']]:[['open','打开业务页'],['read','读取页面内容']];
     if(isPrintOperation(item)&&$('templateHistory').value)steps.push(['convert','生成辅料 XLSX']);
@@ -1521,7 +1532,7 @@ PAGE_HTML = r'''<!doctype html>
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
-  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
+  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
   $('searchInput').addEventListener('input',renderOperations);
   $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())$('styleCodesFile').value=''});
   $('styleCodesFile').addEventListener('change',()=>{if($('styleCodesFile').files.length)$('styleCode').value=''});
@@ -1539,6 +1550,7 @@ PAGE_HTML = r'''<!doctype html>
 
 CONTROLLER = AutomationController()
 ACCESS_TOKEN = secrets.token_urlsafe(32)
+LICENSES = LicenseManager(data_dir)
 
 
 class LocalHandler(BaseHTTPRequestHandler):
@@ -1573,7 +1585,9 @@ class LocalHandler(BaseHTTPRequestHandler):
 
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
-        if self.path == "/api/template":
+        if self.path == "/api/license/import":
+            limit = 256 * 1024
+        elif self.path == "/api/template":
             limit = MAX_TEMPLATE_BYTES * 2
         elif self.path == "/api/run":
             limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
@@ -1596,7 +1610,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                 settings = load_settings()
                 operations = business_operations(settings)
                 print_settings = load_print_settings()
-            self._send(200, {"operations": operations, "settings": settings, "print_settings": print_settings, "task": CONTROLLER.snapshot()})
+            self._send(200, {"operations": operations, "settings": settings, "print_settings": print_settings, "task": CONTROLLER.snapshot(), "license": LICENSES.status()})
         else:
             self._send(404, {"error": "页面不存在。"})
 
@@ -1606,7 +1620,20 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
-            if self.path == "/api/choose-directory":
+            if self.path == "/api/license/request":
+                self._send(200, {"request": LICENSES.request()})
+            elif self.path == "/api/license/check":
+                LICENSES.require_valid(force=True)
+                self._send(200, {"license": LICENSES.status()})
+            elif self.path == "/api/license/import":
+                if CONTROLLER.task_active:
+                    raise ValueError("任务运行期间不能更换授权文件。")
+                content = body.get("document")
+                if not isinstance(content, str):
+                    raise ValueError("授权文件格式无效。")
+                LICENSES.install(content.encode("utf-8"))
+                self._send(200, {"license": LICENSES.status()})
+            elif self.path == "/api/choose-directory":
                 self._send(200, {"path": choose_directory(str(body.get("initial", "")))})
             elif self.path == "/api/print-settings":
                 with CONFIG_LOCK:
@@ -1725,4 +1752,33 @@ def run() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(run())
+    if sys.argv[1:] == ["--self-test"]:
+        from license_keys import PUBLIC_KEYS
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+        from playwright._impl._driver import compute_driver_executable
+        from openpyxl import Workbook
+        if not PUBLIC_KEYS:
+            raise SystemExit("No embedded public keys configured.")
+        for public in PUBLIC_KEYS.values():
+            Ed25519PublicKey.from_public_bytes(public)
+        node, driver = compute_driver_executable()
+        if not Path(node).is_file() or not Path(driver).is_file():
+            raise SystemExit("Bundled Playwright driver is missing.")
+        workbook = Workbook()
+        workbook.close()
+        print("AIOA compiled self-test OK")
+    elif sys.argv[1:] == ["--browser-smoke"]:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(channel="msedge", headless=True)
+            try:
+                page = browser.new_page()
+                page.set_content("<h1>AIOA</h1>")
+                assert page.locator("h1").inner_text() == "AIOA"
+            finally:
+                browser.close()
+        print("AIOA compiled browser smoke test OK")
+    elif sys.argv[1:]:
+        raise SystemExit("Unsupported command line arguments.")
+    else:
+        raise SystemExit(run())
