@@ -1,0 +1,18 @@
+{
+  "customer_id": "vgrass",
+  "business_url": "http://noah.vgrass.com:8088/activiti/html/plm/styleManage/newStyleManage.html#9fdd2c3cfd7941b1bb1dadd4421360ba",
+  "compatibility_hosts": ["noah.vgrass.com"],
+  "api_base_path": "/activiti/",
+  "query_endpoint": "bomTitle/queryProcessSheet",
+  "detail_endpoint": "bomTitle/printProcessSheet",
+  "query_defaults": {"dataType": "Z400"},
+  "fields": {
+    "query_style": "styleCode",
+    "row_style": "styleCode",
+    "row_id": "bomTitleId",
+    "row_sequence": "seqNo",
+    "detail_id": "bomTitleId",
+    "detail_style": "style_code",
+    "template_style": "正式款号"
+  }
+}
