@@ -1,6 +1,6 @@
 # Office Auto Flow
 
-本地运行的 OA 浏览器自动化工作台，支持业务入口管理、登录协助、页面内容读取和工艺单打印。
+本地运行的 OA 自动化工作台，公共主线采用 API 驱动方案，支持登录协助、工艺单 PDF 与辅料 XLSX 导出。
 
 ## Windows 启动
 
@@ -29,9 +29,15 @@
 - `main`：稳定版本基线，只接收经过验证的发布版本。
 - `develop`：日常集成开发分支。
 - `feature/<name>`：较大的新功能从 `develop` 创建，完成后合回 `develop`。
+- `customer/<客户代号>`：同步 `main` 公共功能，客户专属配置只保留在对应分支。
+- `customer/vgrass`：现有 VGRASS 客户版本，包含原有固定业务地址与字段配置。
+- `feature/browser-automation`：保留原浏览器方案。
+
+客户差异由 `customer_profile.py` 和客户分支的 `customer-profile.json` 管理。
+完整维护及同步规则见 [分支规划](docs/BRANCHING.md)。
 - 发布标签使用 `v主版本.次版本.修订号`；测试阶段使用 `-alpha.N`，候选发布使用 `-rc.N`。
 
-当前工作台为早期测试版本，标签为 `v0.1.0-alpha.1`。
+分支改造基线使用 `v0.2.0-alpha.1`，客户交付单独使用客户标签。
 
 ## 文件
 

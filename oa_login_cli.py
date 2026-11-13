@@ -24,6 +24,7 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 from trim_template import _records, export_trim_xlsx
 from license_manager import LicenseManager
+from customer_profile import PROFILE, business_url, compatibility_host
 
 
 APP_NAME = "oa-login-cli"
@@ -41,7 +42,7 @@ LOGIN_COOKIE_NAMES = frozenset({
 })
 FIXED_BUSINESS_OPERATION = {
     "name": "工艺单打印",
-    "url": "http://noah.vgrass.com:8088/activiti/html/plm/styleManage/newStyleManage.html#9fdd2c3cfd7941b1bb1dadd4421360ba",
+    "kind": "process_sheet",
     "description": "输入款号并保存完整工艺单 PDF，可选择模板生成辅料 XLSX。",
 }
 CONFIG_LOCK = threading.Lock()
@@ -248,7 +249,7 @@ def read_style_codes(filename: str, encoded: str) -> List[str]:
 
 
 def business_operations(settings: dict) -> List[dict]:
-    return [dict(FIXED_BUSINESS_OPERATION)]
+    return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings))]
 
 
 def visible_locator(
@@ -342,6 +343,8 @@ def same_page(left: str, right: str) -> bool:
 
 
 def is_process_sheet(operation: dict) -> bool:
+    if operation.get("kind") == "process_sheet":
+        return True
     url = urlparse(operation.get("url", ""))
     return url.path.lower().endswith("/plm/stylemanage/newstylemanage.html")
 
@@ -514,8 +517,7 @@ def preserve_login_session(context: Any, operation: dict) -> bool:
 LOGIN_SUBMIT_GUARD = r"""
 (() => {
   function guard(event) {
-    if (location.hostname !== 'noah.vgrass.com' ||
-        !location.pathname.endsWith('/activiti/html/login.html')) return;
+    if (!location.pathname.endsWith('/activiti/html/login.html')) return;
     const form = document.querySelector('form#loginForm');
     const button = form && form.querySelector('.btn_submit');
     if (!form || !button) return;
@@ -544,8 +546,8 @@ def install_noah_login_compatibility(context: Any) -> None:
     def patch_loader(route: Any) -> None:
         request = route.request
         page_url = urlparse(request.frame.url)
-        if (urlparse(request.url).hostname != "noah.vgrass.com"
-                or page_url.hostname != "noah.vgrass.com"
+        if (not compatibility_host(page_url.hostname, load_settings())
+                or urlparse(request.url).hostname != page_url.hostname
                 or page_url.path not in {"/activiti/html/login.html", "/activiti/html/plm/styleManage/newStyleManage.html", "/activiti/html/plm/styleManage/printAll.html"}):
             route.continue_()
             return
@@ -572,7 +574,8 @@ def install_noah_print_compatibility(context: Any) -> None:
     def patch_print_script(route: Any) -> None:
         request_url = urlparse(route.request.url)
         page_url = urlparse(route.request.frame.url)
-        if (request_url.hostname != "noah.vgrass.com"
+        if (not compatibility_host(page_url.hostname, load_settings())
+                or request_url.hostname != page_url.hostname
                 or request_url.path != "/activiti/js/plm/styleManage/printAll.js"
                 or page_url.path != "/activiti/html/plm/styleManage/printAll.html"):
             route.continue_()
@@ -803,6 +806,7 @@ class AutomationController:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
         style_code = operation["style_code"]
+        fields = PROFILE["fields"]
         self.check_cancelled()
         self.update("reading", f"正在通过接口查询款号 {style_code}…", step="query")
         language = next((item["value"] for item in context.cookies(operation["url"])
@@ -813,8 +817,8 @@ class AutomationController:
         )}
         flags["modifyRecord"] = False
         config = {
-            "base": urljoin(operation["url"], "/activiti/"),
-            "defaults": {"dataType": "Z400", "langu": language},
+            "base": urljoin(operation["url"], PROFILE["api_base_path"]),
+            "defaults": dict(PROFILE["query_defaults"], langu=language),
             "language": language,
             "printLanguage": language,
         }
@@ -863,9 +867,10 @@ class AutomationController:
         page_number = 1
         page_size = 999
         while True:
-            query = dict(config.get("defaults") or {}, styleCode=style_code,
+            query = dict(config.get("defaults") or {},
                          pageNum=page_number, pageSize=page_size, language=config["language"])
-            payload = post_oa("bomTitle/queryProcessSheet", query)
+            query[fields["query_style"]] = style_code
+            payload = post_oa(PROFILE["query_endpoint"], query)
             result = payload.get("data")
             if not isinstance(result, dict) or not isinstance(result.get("list"), list):
                 raise RuntimeError("工艺单查询接口返回格式异常。")
@@ -885,22 +890,22 @@ class AutomationController:
                 raise RuntimeError("工艺单查询页数超过上限，已停止。")
 
         matching = [item for item in rows if isinstance(item, dict) and
-                    re.sub(r"\s+", "", str(item.get("styleCode", ""))).upper() == style_code]
+                    re.sub(r"\s+", "", str(item.get(fields["row_style"], ""))).upper() == style_code]
         if not matching:
-            samples = ", ".join(str(row.get("styleCode", "")) for row in rows[:5] if isinstance(row, dict))
+            samples = ", ".join(str(row.get(fields["row_style"], "")) for row in rows[:5] if isinstance(row, dict))
             raise RuntimeError(f"没有与款号 {style_code} 完全匹配的工艺单；返回款号示例：{samples}")
         seen = set()
         printed = []
         print_url = urljoin(operation["url"], "printAll.html")
         for index, item in enumerate(matching):
             self.check_cancelled()
-            key = str(item.get("bomTitleId") or "")
+            key = str(item.get(fields["row_id"]) or "")
             if not key or key in seen:
                 raise RuntimeError("查询结果缺少唯一编号或存在重复记录，已停止以避免重复打印。")
             seen.add(key)
-            row = {"id": key, "style": item.get("styleCode", ""), "seq": item.get("seqNo", "")}
+            row = {"id": key, "style": item.get(fields["row_style"], ""), "seq": item.get(fields["row_sequence"], "")}
             self.update("reading", f"正在获取第 {index+1} 份工艺单（{style_code}，次数 {row['seq']}）…", step="select")
-            detail = post_oa("bomTitle/printProcessSheet", {"bomTitleId": key}).get("data")
+            detail = post_oa(PROFILE["detail_endpoint"], {fields["detail_id"]: key}).get("data")
             if not isinstance(detail, dict) or not isinstance(detail.get("bomTitle"), dict):
                 raise RuntimeError("工艺单明细接口返回格式异常。")
             params = {"bomtitleid": key, "stylecode": row["style"], "printLangu": config["printLanguage"]}
@@ -936,9 +941,9 @@ class AutomationController:
             if not template_id:
                 printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；未选择模板，未生成辅料 XLSX")
                 continue
-            official_style = str(detail["bomTitle"].get("style_code") or row["style"]).strip()
+            official_style = str(detail["bomTitle"].get(fields["detail_style"]) or row["style"]).strip()
             if operation.get("_batch_trim") is not None:
-                records = _records(trim_tables, {"正式款号": official_style})
+                records = _records(trim_tables, {fields["template_style"]: official_style})
                 if not records:
                     raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；OA 打印页的辅料信息表没有可转换的数据。")
                 with operation["_batch_trim_lock"]:
@@ -955,7 +960,7 @@ class AutomationController:
                 version += 1
             try:
                 conversion = export_trim_xlsx(template_path, trim_tables, converted_xlsx,
-                                              shared_fields={"正式款号": official_style})
+                                              shared_fields={fields["template_style"]: official_style})
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
@@ -1482,7 +1487,7 @@ PAGE_HTML = r'''<!doctype html>
   for(const [buttonId,fieldId] of [['chooseOriginalDir','originalDir'],['chooseConvertedDir','convertedDir']]){
     $(buttonId).addEventListener('click',async()=>{if(choosingDirectory)return;choosingDirectory=true;$(buttonId).textContent='选择中…';renderTask();try{const data=await api('/api/choose-directory','POST',{initial:$(fieldId).value});if(data.path)$(fieldId).value=data.path}catch(error){toast(error.message)}finally{choosingDirectory=false;$(buttonId).textContent='选择文件夹';renderTask()}});
   }
-  function isPrintOperation(item){if(!item)return false;try{const u=new URL(item.url);return u.pathname.toLowerCase().endsWith('/plm/stylemanage/newstylemanage.html')}catch{return false}}
+  function isPrintOperation(item){if(!item)return false;if(item.kind==='process_sheet')return true;try{const u=new URL(item.url);return u.pathname.toLowerCase().endsWith('/plm/stylemanage/newstylemanage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
   settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="submit" class="primary">保存设置</button></div></form></div>';
@@ -1528,7 +1533,7 @@ PAGE_HTML = r'''<!doctype html>
     document.querySelector('.page-title').textContent=chosen?chosen.name:'选择业务操作';document.querySelector('.page-desc').textContent=businessDescription(chosen);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
-    $('runButton').disabled=!canRun(chosen);$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
+    $('runButton').disabled=!canRun(chosen)||!/^https?:\/\//.test(chosen?.url||'');$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
@@ -1676,6 +1681,8 @@ class LocalHandler(BaseHTTPRequestHandler):
                     operation = next((dict(item, login_url=settings["login_url"]) for item in business_operations(settings) if item["name"] == name), None)
                 if operation is None:
                     raise ValueError("业务操作不存在，请刷新页面。")
+                if urlparse(operation["url"]).scheme not in {"http", "https"}:
+                    raise ValueError("请先配置登录地址，再执行任务。")
                 if is_process_sheet(operation):
                     batch_file = body.get("style_codes_file")
                     style_code = str(body.get("style_code", "")).strip().upper()

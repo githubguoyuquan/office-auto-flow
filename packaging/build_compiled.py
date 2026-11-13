@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py")
+APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py")
 
 
 def load_public_keys(path):
@@ -69,8 +69,13 @@ def main():
         if sys.platform == "win32":
             command.extend(["--msvc=latest", "--windows-console-mode=force"])
         if args.target == "workbench":
+            profile_path = ROOT / "customer-profile.json"
+            if profile_path.is_file():
+                shutil.copy2(profile_path, source / profile_path.name)
             command.extend(["--include-package=playwright", "--include-package-data=playwright",
                             "--include-package=openpyxl"])
+            if profile_path.is_file():
+                command.append(f"--include-data-files={source / profile_path.name}=customer-profile.json")
         command.append(str(source / (entry + ".py")))
         subprocess.run(command, cwd=source, check=True)
         dist = root / "build" / (entry + ".dist")
@@ -93,6 +98,11 @@ def main():
                 "sources": {name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest() for name in modules},
                 "public_key_ids": sorted(keys),
                 "executable_sha256": hashlib.sha256((destination / executable).read_bytes()).hexdigest()}
+    if args.target == "workbench":
+        manifest["customer_profile_sha256"] = (
+            hashlib.sha256((ROOT / "customer-profile.json").read_bytes()).hexdigest()
+            if (ROOT / "customer-profile.json").is_file() else None
+        )
     (destination / "build-manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     if args.target == "issuer" and sys.platform == "darwin":
         launcher = destination / "启动签发工具.command"

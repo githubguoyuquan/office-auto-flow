@@ -61,6 +61,7 @@ class HTTPAdmissionTests(unittest.TestCase):
         self.assertEqual(value["request"]["device_id"], self.manager.device)
 
     def test_task_endpoint_requires_license(self):
+        self.assertEqual(self.post("/api/settings", {"login_url": "https://oa.example.test/activiti/html/login.html"})[0], 200)
         self.assertEqual(self.post("/api/print-settings", {"original_dir": str(self.root / "pdf"), "template_id": ""})[0], 200)
         body = {"name": "工艺单打印", "style_code": "TEST123"}
         code, error = self.post("/api/run", body)
