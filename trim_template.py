@@ -31,9 +31,10 @@ def _records(tables: list, shared_fields: dict | None = None) -> list[dict]:
     return records
 
 
-def _match_columns(sheet, records: list[dict]) -> tuple[int, dict[int, str]]:
+def _match_columns(sheet, records: list[dict], generated_headers=()) -> tuple[int, dict[int, str]]:
     names = list(dict.fromkeys(name for record in records for name in record))
     normalized = {_key(name): name for name in names if _key(name)}
+    generated = {_key(name) for name in generated_headers}
     if "正式款号" in names:
         for alias in ("款号", "Style#", "Style No", "Style Number", "Official Style Code",
                       "正式款号 Style#", "正式款号 Style No"):
@@ -44,7 +45,7 @@ def _match_columns(sheet, records: list[dict]) -> tuple[int, dict[int, str]]:
         used = set()
         for cell in row:
             label = _key(cell.value)
-            if not label:
+            if not label or label in generated:
                 continue
             source = normalized.get(label)
             if source is None and label in {"序号", "no", "number", "index"}:
@@ -67,7 +68,8 @@ def _match_columns(sheet, records: list[dict]) -> tuple[int, dict[int, str]]:
         available = "、".join(names[:12])
         raise ValueError(f"模板首个工作表未找到至少两列可对应的辅料表头。OA 字段：{available}")
     unmatched = [str(sheet.cell(best_row, column).value) for column in range(1, sheet.max_column + 1)
-                 if sheet.cell(best_row, column).value not in (None, "") and column not in best_map]
+                 if sheet.cell(best_row, column).value not in (None, "") and column not in best_map
+                 and _key(sheet.cell(best_row, column).value) not in generated]
     if unmatched:
         raise ValueError(f"模板列无法自动匹配：{'、'.join(unmatched[:12])}。请补充列名映射。")
     return best_row, best_map
@@ -75,7 +77,8 @@ def _match_columns(sheet, records: list[dict]) -> tuple[int, dict[int, str]]:
 
 
 def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
-                     shared_fields: dict | None = None) -> dict:
+                     shared_fields: dict | None = None, *, supplier_lookup=None,
+                     material_header: str = "辅料编号") -> dict:
     """Fill the first template sheet and save a separate, editable workbook."""
     from openpyxl import load_workbook
 
@@ -86,8 +89,34 @@ def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
     temporary = destination.with_suffix(".tmp.xlsx")
     try:
         sheet = workbook.worksheets[0]
-        header_row, mapping = _match_columns(sheet, records)
+        generated_headers = ("供应商", "供应商1", "供应商2") if supplier_lookup is not None else ()
+        header_row, mapping = _match_columns(sheet, records, generated_headers)
         data_row = header_row + 1
+        supplier_values = []
+        supplier_missing = 0
+        if supplier_lookup is not None:
+            code_columns = [col for col, field in mapping.items()
+                            if _key(sheet.cell(header_row, col).value) == _key(material_header)
+                            or _key(field) == _key(material_header)]
+            if len(code_columns) != 1:
+                raise ValueError(f"模板中必须有且只有一列“{material_header}”，才能查询供应商。")
+            code_field = mapping[code_columns[0]]
+            cache = {}
+            for record in records:
+                code = str(record.get(code_field, "")).strip()
+                if not code:
+                    supplier_values.append(("", ""))
+                    continue
+                if code not in cache:
+                    pair = supplier_lookup(code)
+                    if (not isinstance(pair, (tuple, list)) or len(pair) != 2
+                            or any(not isinstance(value, str) for value in pair)):
+                        raise ValueError(f"辅料 {code} 的供应商查询返回格式无效。")
+                    cache[code] = tuple(pair)
+                pair = cache[code]
+                supplier_values.append(pair)
+                if not any(pair):
+                    supplier_missing += 1
         if any(r.min_row <= data_row <= r.max_row for r in sheet.merged_cells.ranges):
             raise ValueError("模板数据起始行包含合并单元格，无法安全自动填充。")
         if any(sheet.cell(data_row, col).value not in (None, "") for col in range(1, sheet.max_column + 1)):
@@ -133,9 +162,43 @@ def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
                 if isinstance(value, str):
                     # OA values are text, including codes with leading zeros or '='.
                     cell.data_type = "s"
+        supplier_columns = []
+        if supplier_lookup is not None:
+            headers = {_key(sheet.cell(header_row, col).value): col
+                       for col in range(1, sheet.max_column + 1)
+                       if sheet.cell(header_row, col).value not in (None, "")}
+            style_column = max(mapping)
+            for index, title in enumerate(("供应商", "供应商2")):
+                existing = headers.get(_key(title))
+                if index == 0:
+                    existing = existing or headers.get(_key("供应商1"))
+                if index == 1 and not existing and not any(pair[1] for pair in supplier_values):
+                    continue
+                column = existing or sheet.max_column + 1
+                supplier_columns.append(column)
+                header = sheet.cell(header_row, column)
+                if not existing:
+                    header._style = copy(sheet.cell(header_row, style_column)._style)
+                    from openpyxl.utils import get_column_letter
+                    sheet.column_dimensions[get_column_letter(column)].width = 28
+                header.value = title
+                for offset, pair in enumerate(supplier_values):
+                    cell = sheet.cell(data_row + offset, column)
+                    if not existing:
+                        cell._style = copy(sheet.cell(data_row + offset, style_column)._style)
+                    cell.value = pair[index]
+                    cell.data_type = "s"
+            if sheet.print_area:
+                from openpyxl.worksheet.cell_range import CellRange
+                from openpyxl.worksheet.print_settings import PrintArea
+                sheet.print_area = [str(CellRange(min_col=area.min_col, min_row=area.min_row,
+                    max_col=max(area.max_col, max(supplier_columns)),
+                    max_row=max(area.max_row, end_row)))
+                    for area in PrintArea.from_string(sheet.print_area).ranges]
         workbook.save(temporary)
         os.replace(temporary, destination)
-        return {"rows": len(records), "columns": len(mapping), "sheet": sheet.title}
+        return {"rows": len(records), "columns": len(mapping) + len(supplier_columns),
+                "sheet": sheet.title, "supplier_missing": supplier_missing}
     finally:
         workbook.close()
         if temporary.exists():
