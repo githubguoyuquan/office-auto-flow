@@ -25,7 +25,8 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 from trim_template import _records, export_trim_xlsx
 from license_manager import LicenseManager
 from customer_profile import PROFILE, business_url, compatibility_host
-from material_suppliers import MaterialSupplierLookup
+from material_suppliers import (MaterialSupplierLookup, MAX_MAPPING_BYTES, load_supplier_mapping,
+                                save_supplier_mapping, supplier_mapping_status, supplier_names)
 
 
 APP_NAME = "oa-login-cli"
@@ -640,6 +641,11 @@ class AutomationController:
                 raise ValueError("工作台正在退出，无法启动新任务。")
             if self.task_active:
                 raise ValueError("已有任务正在运行，请先等待或停止。")
+            with CONFIG_LOCK:
+                name_mapping = (load_supplier_mapping(data_dir())["entries"]
+                                if operation.get("print_settings", {}).get("template_id")
+                                and PROFILE["supplier_lookup"]["enabled"] else {})
+            operation = dict(operation, supplier_name_mapping=name_mapping)
             self.messages = queue.Queue()
             self.cancel_event.clear()
             self.task_active = True
@@ -855,7 +861,7 @@ class AutomationController:
         def find_suppliers(code: str) -> tuple:
             self.check_cancelled()
             self.update("reading", f"正在查询辅料 {code} 的供应商…", step="suppliers")
-            return lookup(code)
+            return supplier_names(lookup(code), operation.get("supplier_name_mapping", {}))
 
         return {"supplier_lookup": find_suppliers, "material_header": settings["material_header"]}
 
@@ -1525,11 +1531,17 @@ PAGE_HTML = r'''<!doctype html>
     $(buttonId).addEventListener('click',async()=>{if(choosingDirectory)return;choosingDirectory=true;$(buttonId).textContent='选择中…';renderTask();try{const data=await api('/api/choose-directory','POST',{initial:$(fieldId).value});if(data.path)$(fieldId).value=data.path}catch(error){toast(error.message)}finally{choosingDirectory=false;$(buttonId).textContent='选择文件夹';renderTask()}});
   }
   function isPrintOperation(item){if(!item)return false;if(item.kind==='process_sheet')return true;try{const u=new URL(item.url);return u.pathname.toLowerCase().endsWith('/plm/stylemanage/newstylemanage.html')}catch{return false}}
-  const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.textContent='系统设置';document.querySelector('.top-right').prepend(settingsButton);
+  const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.id='applicationSettings';settingsButton.textContent='应用配置';document.querySelector('.top-right').prepend(settingsButton);
   const settingsModal=document.createElement('div');settingsModal.className='modal-backdrop';
-  settingsModal.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">系统设置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭设置">×</button></div><p>登录是所有业务的前置步骤，无需添加为业务入口。验证码仍在 OA 浏览器中手工输入。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="submit" class="primary">保存设置</button></div></form></div>';
+  settingsModal.innerHTML=`<div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle"><div class="modal-top"><h3 id="settingsTitle">应用配置</h3><button type="button" class="icon-btn" id="closeSettings" aria-label="关闭配置">×</button></div><p>配置保存在当前电脑，后续任务自动使用。</p><form id="settingsForm"><label class="field-label" for="systemLoginUrl">登录页面 URL</label><input class="field" id="systemLoginUrl" type="url" placeholder="https://example.com/oa/login"><div class="modal-actions"><button type="submit" class="primary">保存登录设置</button></div></form><section style="margin-top:22px;padding-top:18px;border-top:1px solid var(--line)" aria-labelledby="supplierMappingTitle"><h4 id="supplierMappingTitle" style="margin:0 0 8px">供应商名称映射</h4><p class="panel-sub">可选 XLSX 文件，首个工作表第一列为供应商编号、第二列为供应商名称，可含表头。上传后长期保存，更新后用于下一次任务；未上传或编号未匹配时显示供应商编号。</p><p id="supplierMappingStatus" class="panel-sub" role="status"></p><input id="supplierMappingFile" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden><div class="modal-actions"><button id="clearSupplierMapping" type="button" class="ghost" disabled>清除映射</button><button id="uploadSupplierMapping" type="button" class="primary">上传映射表</button></div></section></div>`;
   document.body.append(settingsModal);
-  settingsButton.onclick=async()=>{try{const data=await api('/api/state');$('systemLoginUrl').value=data.settings.login_url||'';settingsModal.classList.add('open');$('systemLoginUrl').focus()}catch(error){toast(error.message)}};
+  let supplierMappingState={configured:false,count:0},supplierMappingBusy=false;
+  const supplierMappingError=document.createElement('p');supplierMappingError.id='supplierMappingError';supplierMappingError.className='panel-sub';supplierMappingError.style.color='var(--bad)';supplierMappingError.setAttribute('role','alert');supplierMappingError.hidden=true;$('supplierMappingStatus').after(supplierMappingError);
+  function renderSupplierMapping(){const active=runningPhases.has(currentTask.phase);$('uploadSupplierMapping').disabled=supplierMappingBusy||active;$('clearSupplierMapping').disabled=supplierMappingBusy||active||(!supplierMappingState.configured&&!supplierMappingState.error);$('uploadSupplierMapping').textContent=supplierMappingBusy?'处理中…':supplierMappingState.configured?'更新映射表':'上传映射表';$('supplierMappingStatus').textContent=supplierMappingState.error|| (supplierMappingState.configured?`${supplierMappingState.filename} · ${supplierMappingState.count} 条映射 · 更新于 ${new Date(supplierMappingState.uploaded_at).toLocaleString('zh-CN')}`:'尚未上传，导出的供应商字段将显示供应商编号。')}
+  settingsButton.onclick=async()=>{try{const data=await api('/api/state');$('systemLoginUrl').value=data.settings.login_url||'';supplierMappingState=data.supplier_mapping||{configured:false,count:0};renderSupplierMapping();settingsModal.classList.add('open');$('systemLoginUrl').focus()}catch(error){toast(error.message)}};
+  $('uploadSupplierMapping').onclick=()=>$('supplierMappingFile').click();
+  $('supplierMappingFile').onchange=async()=>{const file=$('supplierMappingFile').files[0];if(!file)return;supplierMappingBusy=true;supplierMappingError.hidden=true;renderSupplierMapping();try{if(!file.name.toLowerCase().endsWith('.xlsx')||file.size>5*1024*1024)throw Error('请选择 5 MB 以内的 XLSX 映射表。');const content=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(Error('映射表读取失败'));reader.readAsDataURL(file)});const data=await api('/api/supplier-mapping','POST',{filename:file.name,content});supplierMappingState=data.supplier_mapping;toast('供应商映射已保存，后续任务自动使用')}catch(error){supplierMappingError.textContent=error.message;supplierMappingError.hidden=false;toast(error.message)}finally{supplierMappingBusy=false;$('supplierMappingFile').value='';renderSupplierMapping()}};
+  $('clearSupplierMapping').onclick=async()=>{if(supplierMappingBusy)return;supplierMappingBusy=true;renderSupplierMapping();try{const data=await api('/api/supplier-mapping/clear','POST',{});supplierMappingState=data.supplier_mapping;supplierMappingError.hidden=true;toast('映射已清除，后续导出显示供应商编号')}catch(error){toast(error.message)}finally{supplierMappingBusy=false;renderSupplierMapping()}};
   $('closeSettings').onclick=()=>{settingsModal.classList.remove('open');settingsButton.focus()};
   settingsModal.addEventListener('click',event=>{if(event.target===settingsModal)$('closeSettings').click()});
   document.addEventListener('keydown',event=>{if(event.key==='Escape'&&settingsModal.classList.contains('open'))$('closeSettings').click()});
@@ -1561,6 +1573,7 @@ PAGE_HTML = r'''<!doctype html>
   }
   function renderDetail(){const item=selected();const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
+    renderSupplierMapping();
     exitButton.disabled=choosingDirectory||exiting;
     $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=runningPhases.has(currentTask.phase);
     for(const id of ['chooseOriginalDir','chooseConvertedDir'])$(id).disabled=choosingDirectory||runningPhases.has(currentTask.phase);
@@ -1574,7 +1587,7 @@ PAGE_HTML = r'''<!doctype html>
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
-  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
+  async function refresh(){try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(!supplierMappingBusy)supplierMappingState=data.supplier_mapping||{configured:false,count:0};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}}
   $('searchInput').addEventListener('input',renderOperations);
   $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())$('styleCodesFile').value=''});
   $('styleCodesFile').addEventListener('change',()=>{if($('styleCodesFile').files.length)$('styleCode').value=''});
@@ -1631,6 +1644,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             limit = 256 * 1024
         elif self.path == "/api/template":
             limit = MAX_TEMPLATE_BYTES * 2
+        elif self.path == "/api/supplier-mapping":
+            limit = MAX_MAPPING_BYTES * 2
         elif self.path == "/api/run":
             limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
         else:
@@ -1652,7 +1667,8 @@ class LocalHandler(BaseHTTPRequestHandler):
                 settings = load_settings()
                 operations = business_operations(settings)
                 print_settings = load_print_settings()
-            self._send(200, {"operations": operations, "settings": settings, "print_settings": print_settings, "task": CONTROLLER.snapshot(), "license": LICENSES.status()})
+            self._send(200, {"operations": operations, "settings": settings, "print_settings": print_settings, "task": CONTROLLER.snapshot(), "license": LICENSES.status(),
+                             "supplier_mapping": supplier_mapping_status(data_dir())})
         else:
             self._send(404, {"error": "页面不存在。"})
 
@@ -1675,6 +1691,16 @@ class LocalHandler(BaseHTTPRequestHandler):
                     raise ValueError("授权文件格式无效。")
                 LICENSES.install(content.encode("utf-8"))
                 self._send(200, {"license": LICENSES.status()})
+            elif self.path in {"/api/supplier-mapping", "/api/supplier-mapping/clear"}:
+                if CONTROLLER.task_active:
+                    raise ValueError("任务运行期间不能更新供应商映射表，请等待任务完成。")
+                with CONFIG_LOCK:
+                    if self.path.endswith("/clear"):
+                        (data_dir() / "supplier-names.json").unlink(missing_ok=True)
+                        status = supplier_mapping_status(data_dir())
+                    else:
+                        status = save_supplier_mapping(data_dir(), body.get("filename"), body.get("content"))
+                self._send(200, {"supplier_mapping": status})
             elif self.path == "/api/choose-directory":
                 self._send(200, {"path": choose_directory(str(body.get("initial", "")))})
             elif self.path == "/api/print-settings":

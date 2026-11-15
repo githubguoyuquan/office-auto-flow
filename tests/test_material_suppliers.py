@@ -105,7 +105,7 @@ class SupplierWorkflowTests(unittest.TestCase):
     def http_result(url, payload):
         return SimpleNamespace(status=200, ok=True, url=url, json=lambda: payload)
 
-    def assert_export(self):
+    def assert_export(self, suppliers=("160002", "000003")):
         files = list(self.output.glob("*.xlsx"))
         self.assertEqual(len(files), 1)
         book = load_workbook(files[0])
@@ -113,11 +113,12 @@ class SupplierWorkflowTests(unittest.TestCase):
             self.assertEqual([book.active.cell(1, col).value for col in range(1, 5)],
                              ["辅料编号", "名称", "供应商", "供应商2"])
             self.assertEqual([book.active.cell(2, col).value for col in range(1, 5)],
-                             ["TTX3240", "辅料", "160002", "000003"])
+                             ["TTX3240", "辅料", *suppliers])
         finally:
             book.close()
 
     def test_single_print_calls_supplier_api_and_exports_the_same_row(self):
+        self.operation["supplier_name_mapping"] = {"160002": "供应商甲", "000003": "供应商乙"}
         def post(url, **kwargs):
             if url.endswith("queryProcessSheet"):
                 payload = response([{"styleCode": "STYLE1", "bomTitleId": "ID1", "seqNo": "00"}])
@@ -132,9 +133,10 @@ class SupplierWorkflowTests(unittest.TestCase):
         tables = [[['辅料编号', 'TTX3240'], ['名称', '辅料']]]
         with patch.object(app, "save_process_sheet_pdf", return_value=(self.root / "print.pdf", "", tables)):
             self.controller._print_process_sheets(self.context, self.page, self.operation)
-        self.assert_export()
+        self.assert_export(("供应商甲", "供应商乙"))
 
     def test_batch_aggregate_uses_the_primary_context_for_suppliers(self):
+        self.operation["supplier_name_mapping"] = {"160002": "供应商甲"}
         def run(job, context, publish):
             job["_batch_trim"].append(("STYLE1", 0, [{"辅料编号": "TTX3240", "名称": "辅料"}]))
             return {"phase": "done", "content": "PDF saved"}
@@ -143,7 +145,7 @@ class SupplierWorkflowTests(unittest.TestCase):
             {"materialCode": "TTX3240", "supplier1": "160002", "supplier2": "000003"}]))
         with patch.object(app, "open_business_page"):
             self.controller._run_batch(self.operation, self.context, None)
-        self.assert_export()
+        self.assert_export(("供应商甲", "000003"))
         self.context.request.post.assert_called_once()
         self.assertEqual(self.controller.snapshot()["phase"], "done")
 

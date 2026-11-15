@@ -1,6 +1,124 @@
 """Query exact material supplier identifiers using an authenticated OA transport."""
 from copy import deepcopy
+import base64
+import io
+import json
+import math
+import os
+from pathlib import Path
+import re
+import tempfile
+from datetime import datetime, timezone
 from urllib.parse import urlparse
+
+MAX_MAPPING_BYTES = 5 * 1024 * 1024
+
+
+def read_supplier_mapping(filename, encoded):
+    """Read code/name pairs from the first two columns without losing text codes."""
+    if not isinstance(filename, str) or not filename.lower().endswith(".xlsx"):
+        raise ValueError("供应商名称映射表必须是 XLSX 文件。")
+    try:
+        content = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError):
+        raise ValueError("供应商名称映射表文件编码无效。")
+    if not content or len(content) > MAX_MAPPING_BYTES:
+        raise ValueError("供应商名称映射表不能超过 5 MB。")
+    from openpyxl import load_workbook
+    try:
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=False)
+    except Exception as error:
+        raise ValueError("无法读取供应商名称映射表，请检查 XLSX 文件。") from error
+    try:
+        sheet = workbook.worksheets[0]
+        if sheet.max_row and sheet.max_row > 50001:
+            raise ValueError("供应商名称映射表最多支持 50000 条数据。")
+        mapping = {}
+        first = True
+        for index, row in enumerate(sheet.iter_rows(max_col=2), 1):
+            code_cell, name_cell = row
+            if code_cell.data_type == "f" or name_cell.data_type == "f":
+                raise ValueError(f"供应商映射表第 {index} 行包含公式，请改为编号和名称原值。")
+            code, name = code_cell.value, name_cell.value
+            if code in (None, "") and name in (None, ""):
+                continue
+            if code is None or (isinstance(code, str) and not code.strip()):
+                raise ValueError(f"供应商映射表第 {index} 行缺少供应商编号，请补全后重新上传。")
+            if type(code) in (int, float):
+                if not math.isfinite(code) or code != int(code):
+                    raise ValueError(f"供应商映射表第 {index} 行编号必须为文本或整数。")
+                code = str(int(code))
+                if re.fullmatch(r"0+", code_cell.number_format or ""):
+                    code = code.zfill(len(code_cell.number_format))
+            elif not isinstance(code, str):
+                raise ValueError(f"供应商映射表第 {index} 行编号无效。")
+            code = code.strip()
+            if not isinstance(name, str) or not name.strip() or not code:
+                raise ValueError(f"供应商映射表第 {index} 行缺少编号或供应商名称。")
+            name = name.strip()
+            if first and code in {"供应商编号", "供应商代码", "supplierCode"} and name in {"供应商名称", "supplierName"}:
+                first = False
+                continue
+            first = False
+            if code in mapping and mapping[code] != name:
+                raise ValueError(f"供应商编号 {code} 对应多个不同名称，请先修正映射表。")
+            mapping[code] = name
+        if not mapping:
+            raise ValueError("供应商名称映射表没有有效数据。")
+        return mapping
+    finally:
+        workbook.close()
+
+
+def supplier_names(codes, mapping):
+    return tuple(mapping.get(code, code) if code else "" for code in codes)
+
+
+def load_supplier_mapping(directory):
+    path = Path(directory) / "supplier-names.json"
+    try:
+        with path.open(encoding="utf-8") as stream:
+            value = json.load(stream)
+    except FileNotFoundError:
+        return {"entries": {}}
+    except (ValueError, OSError) as error:
+        raise ValueError("已保存的供应商映射表无法读取，请在应用配置中重新上传或清除。") from error
+    entries = value.get("entries") if isinstance(value, dict) else None
+    if (not isinstance(value, dict) or value.get("version") != 1 or not isinstance(entries, dict)
+            or not entries or len(entries) > 50000 or any(
+                not isinstance(code, str) or not code.strip() or not isinstance(name, str) or not name.strip()
+                for code, name in entries.items())
+            or not isinstance(value.get("filename"), str) or not isinstance(value.get("uploaded_at"), str)):
+        raise ValueError("已保存的供应商映射表格式无效，请在应用配置中重新上传或清除。")
+    return value
+
+
+def supplier_mapping_status(directory):
+    try:
+        value = load_supplier_mapping(directory)
+    except ValueError as error:
+        return {"configured": False, "count": 0, "error": str(error)}
+    return {"configured": bool(value["entries"]), "count": len(value["entries"]),
+            "filename": value.get("filename", ""), "uploaded_at": value.get("uploaded_at", "")}
+
+
+def save_supplier_mapping(directory, filename, encoded):
+    entries = read_supplier_mapping(filename, encoded)
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    value = {"version": 1, "filename": filename.replace("\\", "/").rsplit("/", 1)[-1],
+             "uploaded_at": datetime.now(timezone.utc).isoformat(), "entries": entries}
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".tmp", dir=directory, delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, ensure_ascii=False)
+        os.replace(temporary, directory / "supplier-names.json")
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return supplier_mapping_status(directory)
 
 
 DEFAULT_SUPPLIER_LOOKUP = {

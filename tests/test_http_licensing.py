@@ -16,6 +16,52 @@ from offline_license import TrustedClock
 
 
 class HTTPAdmissionTests(unittest.TestCase):
+    @staticmethod
+    def mapping_body(name="供应商甲"):
+        import io
+        from openpyxl import Workbook
+        book = Workbook()
+        book.active.append(["供应商编号", "供应商名称"])
+        book.active.append([160002, name])
+        stream = io.BytesIO()
+        book.save(stream)
+        book.close()
+        return {"filename": "供应商信息表.xlsx", "content": base64.b64encode(stream.getvalue()).decode()}
+
+    def test_supplier_mapping_configuration_upload_update_and_clear(self):
+        from material_suppliers import load_supplier_mapping
+        body = self.mapping_body()
+        self.assertEqual(self.post("/api/supplier-mapping", body, False)[0], 403)
+        code, result = self.post("/api/supplier-mapping", body)
+        self.assertEqual(code, 200, result)
+        self.assertEqual(result["supplier_mapping"]["count"], 1)
+        self.assertEqual(self.post("/api/supplier-mapping", self.mapping_body("供应商乙"))[0], 200)
+        self.assertEqual(load_supplier_mapping(self.root)["entries"], {"160002": "供应商乙"})
+        self.assertEqual(self.post("/api/supplier-mapping", {"filename": "bad.xlsx", "content": "invalid"})[0], 400)
+        missing = self.mapping_body()
+        import io
+        from openpyxl import load_workbook
+        book = load_workbook(io.BytesIO(base64.b64decode(missing["content"])))
+        book.active["A2"].value = None
+        stream = io.BytesIO()
+        book.save(stream)
+        book.close()
+        missing["content"] = base64.b64encode(stream.getvalue()).decode()
+        code, error = self.post("/api/supplier-mapping", missing)
+        self.assertEqual(code, 400)
+        self.assertIn("第 2 行缺少供应商编号", error["error"])
+        self.assertIn("重新上传", error["error"])
+        self.assertEqual(load_supplier_mapping(self.root)["entries"], {"160002": "供应商乙"})
+        code, result = self.post("/api/supplier-mapping/clear", {})
+        self.assertEqual(code, 200, result)
+        self.assertFalse(result["supplier_mapping"]["configured"])
+        self.assertEqual(load_supplier_mapping(self.root)["entries"], {})
+
+    def test_running_task_blocks_supplier_mapping_updates(self):
+        app.CONTROLLER.task_active = True
+        self.assertEqual(self.post("/api/supplier-mapping", self.mapping_body())[0], 400)
+        self.assertEqual(self.post("/api/supplier-mapping/clear", {})[0], 400)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
