@@ -33,6 +33,49 @@ class LicensingTests(unittest.TestCase):
         return issue_license(self.request, self.private, "test-password-only", "测试客户",
                              now=self.base, **kwargs)
 
+    def module_license(self, features):
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        value = json.loads(self.issue(days=7))
+        value["payload"]["features"] = features
+        key = load_pem_private_key(self.private, password=b"test-password-only")
+        value["signature"] = base64.b64encode(key.sign(core.canonical_payload(value["payload"]))).decode()
+        return json.dumps(value).encode()
+
+    def test_module_permissions_are_independent_of_license_validity(self):
+        self.manager.install(self.module_license(["future_business"]))
+        self.assertTrue(self.manager.status()["valid"])
+        self.assertEqual(self.manager.status()["features"], ["future_business"])
+        self.manager.require_valid(feature="future_business")
+        with self.assertRaises(core.LicenseError):
+            self.manager.require_valid(feature="process_sheet")
+        self.manager.install(self.issue(days=7))
+        self.manager.require_valid(feature="process_sheet")
+        with self.assertRaises(core.LicenseError):
+            self.manager.require_valid(feature="future_business")
+
+    def test_module_tampering_or_duplicate_grants_are_rejected(self):
+        original = self.issue(days=7)
+        self.manager.install(original)
+        value = json.loads(original)
+        value["payload"]["features"].append("future_business")
+        with self.assertRaises(core.LicenseError):
+            self.manager.install(json.dumps(value).encode())
+        self.assertEqual(self.manager.path.read_bytes(), original)
+        with self.assertRaises(core.LicenseError):
+            self.manager.install(self.module_license(["process_sheet", "process_sheet"]))
+
+    def test_controller_denies_ungranted_or_unregistered_module(self):
+        import oa_login_cli as app
+        controller = app.AutomationController()
+        self.manager.install(self.issue(days=7))
+        with patch.object(app, "LICENSES", self.manager):
+            with self.assertRaises(core.LicenseError):
+                controller.start({"name": "未来测试业务", "module_id": "future_business"})
+            with self.assertRaises(ValueError):
+                controller.start({"name": "未注册业务"})
+        self.assertFalse(controller.task_active)
+        self.assertTrue(controller.jobs.empty())
+
     def test_roundtrip_configurable_days_and_expiry(self):
         for days in (1, 7, 30, 90):
             self.manager.install(self.issue(days=days))
@@ -68,13 +111,13 @@ class LicensingTests(unittest.TestCase):
         controller.worker.is_alive.return_value = True
         self.manager.install(self.issue(days=1))
         with patch.object(app, "LICENSES", self.manager):
-            controller.start({"name": "test"})
+            controller.start({"name": "test", "module_id": "process_sheet"})
             self.elapsed = self.wall = 86400
             self.assertFalse(self.manager.status()["valid"])
             self.assertFalse(controller.cancel_event.is_set())
             controller.task_active = False
             with self.assertRaises(core.LicenseError):
-                controller.start({"name": "test"})
+                controller.start({"name": "test", "module_id": "process_sheet"})
 
     def test_daily_check_and_rollback(self):
         self.manager.install(self.issue(days=30))

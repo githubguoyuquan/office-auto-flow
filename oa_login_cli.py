@@ -44,6 +44,7 @@ LOGIN_COOKIE_NAMES = frozenset({
 })
 FIXED_BUSINESS_OPERATION = {
     "name": "工艺单打印",
+    "module_id": "process_sheet",
     "kind": "process_sheet",
     "description": "输入款号并保存完整工艺单 PDF，可选择模板生成辅料 XLSX。",
 }
@@ -635,7 +636,10 @@ class AutomationController:
             )
 
     def start(self, operation: dict) -> None:
-        LICENSES.require_valid()
+        module_id = operation.get("module_id")
+        if not isinstance(module_id, str) or not module_id.strip():
+            raise ValueError("该业务尚未配置授权模块，请联系管理员。")
+        LICENSES.require_valid(feature=module_id)
         with self.lock:
             if self.shutdown_event.is_set():
                 raise ValueError("工作台正在退出，无法启动新任务。")
@@ -1509,10 +1513,12 @@ PAGE_HTML = r'''<!doctype html>
   document.querySelector('.top-right').prepend(themeButton);updateThemeButton();
   let exiting=false;const exitButton=document.createElement('button');exitButton.type='button';exitButton.className='theme-toggle';exitButton.id='exitWorkbench';exitButton.textContent='退出工作台';document.querySelector('.top-right').append(exitButton);
   const $ = id => document.getElementById(id);
-  let licenseState={valid:false},licenseChecking=false,licenseAutoAttempted=false;
+  let licenseState={valid:false,features:[]},licenseChecking=false,licenseAutoAttempted=false;
   const licenseButton=document.createElement('button');licenseButton.type='button';licenseButton.className='theme-toggle';licenseButton.id='licenseButton';licenseButton.textContent='授权管理';document.querySelector('.top-right').prepend(licenseButton);
   const licenseModal=document.createElement('div');licenseModal.className='modal-backdrop';licenseModal.id='licenseModal';licenseModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="licenseTitle"><div class="modal-top"><h3 id="licenseTitle">软件授权</h3><button class="ghost" id="closeLicense" type="button">关闭</button></div><p id="licenseMessage" role="status"></p><label class="field-label">设备码</label><input id="licenseDevice" class="field" readonly><p id="licenseDetails" class="panel-sub"></p><div class="modal-actions" style="flex-wrap:wrap"><button id="exportRequest" class="ghost" type="button">导出设备申请</button><button id="checkLicense" class="ghost" type="button">联网校验</button><button id="importLicense" class="primary" type="button">导入授权文件</button></div><input id="licenseFile" type="file" accept=".license,application/json" hidden><p class="panel-sub">首次激活、工作台重启后及每隔 24 小时需要联网校时。当前任务可执行完成；到期后无法开始新任务。</p></section>`;document.body.append(licenseModal);
-  function renderLicense(){licenseButton.textContent=licenseState.valid?'授权有效':'授权管理';$('licenseMessage').textContent=licenseChecking?'正在联网校验时间…':licenseState.message||'尚未授权';$('licenseDevice').value=licenseState.device_id||'';$('licenseDetails').textContent=licenseState.expires_at?'授权到期：'+new Date(licenseState.expires_at).toLocaleString('zh-CN')+(licenseState.valid?' · 剩余 '+Math.ceil(licenseState.remaining_seconds/86400)+' 天':'')+(licenseState.customer?' · '+licenseState.customer:''):'';$('checkLicense').disabled=licenseChecking;$('importLicense').disabled=licenseChecking||runningPhases.has(currentTask.phase)}
+  const licensedModules=document.createElement('p');licensedModules.id='licensedModules';licensedModules.className='panel-sub';$('licenseDetails').after(licensedModules);
+  function moduleAllowed(item){return licenseState.valid&&Array.isArray(licenseState.features)&&licenseState.features.includes(item?.module_id)}
+  function renderLicense(){licenseButton.textContent=licenseState.valid?'授权有效':'授权管理';$('licenseMessage').textContent=licenseChecking?'正在联网校验时间…':licenseState.message||'尚未授权';$('licenseDevice').value=licenseState.device_id||'';$('licenseDetails').textContent=licenseState.expires_at?'授权到期：'+new Date(licenseState.expires_at).toLocaleString('zh-CN')+(licenseState.valid?' · 剩余 '+Math.ceil(licenseState.remaining_seconds/86400)+' 天':'')+(licenseState.customer?' · '+licenseState.customer:''):'';const features=licenseState.features||[];licensedModules.textContent='许可证模块范围：'+(features.length?features.map(id=>operations.find(item=>item.module_id===id)?.name||id).join('、'):'尚未授权');$('checkLicense').disabled=licenseChecking;$('importLicense').disabled=licenseChecking||runningPhases.has(currentTask.phase)}
   licenseButton.onclick=()=>{renderLicense();licenseModal.classList.add('open')};$('closeLicense').onclick=()=>licenseModal.classList.remove('open');
   async function checkLicense(){if(licenseChecking)return;licenseChecking=true;renderLicense();try{const result=await api('/api/license/check','POST',{});licenseState=result.license}catch(error){licenseState={...licenseState,valid:false,message:error.message};toast(error.message)}finally{licenseChecking=false;renderLicense();renderTask()}}
   $('checkLicense').onclick=checkLicense;
@@ -1555,7 +1561,7 @@ PAGE_HTML = r'''<!doctype html>
   async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
-  function canRun(item){if(!licenseState.valid||licenseChecking||exiting||!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
+  function canRun(item){if(!moduleAllowed(item)||licenseChecking||exiting||!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
   function renderTimeline(item){
     const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF']]:[['open','打开业务页'],['read','读取页面内容']];
     if(isPrintOperation(item)&&$('templateHistory').value){if(item.supplier_lookup_enabled)steps.push(['suppliers','查询辅料供应商']);steps.push(['convert','生成辅料 XLSX'])}
@@ -1569,6 +1575,7 @@ PAGE_HTML = r'''<!doctype html>
     const list=$('operationList');list.replaceChildren();const query=$('searchInput').value.trim().toLocaleLowerCase();const filtered=operations.filter(item=>(item.name+' '+item.url+' '+(item.login_url||'')).toLocaleLowerCase().includes(query));
     if(!filtered.length){const wrap=document.createElement('div');wrap.className='empty';wrap.innerHTML='<div class="empty-icon"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8 10h8M8 14h6"/></svg></div><h4>'+(operations.length?'没有找到匹配的业务':'还没有业务操作')+'</h4><p>'+(operations.length?'试试其他名称或地址':'暂无可用业务')+'</p>';list.append(wrap)}
     for(const item of filtered){const button=document.createElement('button');button.className='operation'+(item.name===selectedName?' selected':'');button.type='button';button.setAttribute('aria-pressed',item.name===selectedName?'true':'false');const icon=document.createElement('span');icon.className='op-icon';icon.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6.5h16v11H4z"/><path d="M8 10h8M8 13.5h5"/></svg>';const copy=document.createElement('span');copy.className='op-copy';const name=document.createElement('div');name.className='op-name';name.textContent=item.name;const url=document.createElement('div');url.className='op-url';url.textContent=item.url;copy.append(name,url);const arrow=document.createElement('span');arrow.className='op-arrow';arrow.textContent='›';button.append(icon,copy,arrow);button.addEventListener('click',()=>{selectedName=item.name;renderOperations();renderDetail();renderTask()});list.append(button)}
+    filtered.forEach((item,index)=>{if(licenseState.valid&&!moduleAllowed(item))list.children[index].querySelector('.op-name').textContent+=' · 未授权'});
     $('countValue').textContent=operations.length+' 项';
   }
   function renderDetail(){const item=selected();const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
@@ -1583,6 +1590,7 @@ PAGE_HTML = r'''<!doctype html>
     document.querySelector('.page-title').textContent=chosen?chosen.name:'选择业务操作';document.querySelector('.page-desc').textContent=businessDescription(chosen);
     const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
+    if(phase==='idle'&&chosen&&licenseState.valid&&!moduleAllowed(chosen)){$('statusTitle').textContent='业务未授权';$('statusMessage').textContent='当前许可证未包含此业务模块，请联系管理员调整授权。'}
     $('runButton').disabled=!canRun(chosen)||!/^https?:\/\//.test(chosen?.url||'');$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}

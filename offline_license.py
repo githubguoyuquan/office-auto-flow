@@ -125,7 +125,9 @@ def verify_license(document: bytes, public_keys: dict[str, bytes],
     if not isinstance(payload.get("license_id"), str) or not payload["license_id"].strip():
         raise LicenseError("授权编号无效。")
     features = payload.get("features")
-    if not isinstance(features, list) or not features or any(not isinstance(item, str) or not item for item in features):
+    if (not isinstance(features, list) or not features
+            or any(not isinstance(item, str) or not item for item in features)
+            or len(set(features)) != len(features)):
         raise LicenseError("授权功能列表无效。")
     issued, start, end = (_timestamp(payload.get(field)) for field in ("issued_at", "not_before", "expires_at"))
     if not issued <= start < end:
@@ -233,9 +235,9 @@ class TrustedClock:
 
 
 def validate_license(document: bytes, public_keys: dict[str, bytes], expected_device: str,
-                     clock: TrustedClock, feature: str = "process_sheet") -> dict:
+                     clock: TrustedClock, feature: str | None = "process_sheet") -> dict:
     payload = verify_license(document, public_keys, expected_device)
-    if feature not in payload["features"]:
+    if feature is not None and feature not in payload["features"]:
         raise LicenseError("当前授权不包含此功能。")
     now = clock.now()
     if now < _timestamp(payload["issued_at"]) or now < _timestamp(payload["not_before"]):
@@ -243,5 +245,6 @@ def validate_license(document: bytes, public_keys: dict[str, bytes], expected_de
     if now >= _timestamp(payload["expires_at"]):
         raise LicenseError("授权已到期，请联系管理员续期。")
     return {"license_id": payload["license_id"], "expires_at": payload["expires_at"],
+            "features": list(payload["features"]),
             "remaining_seconds": int(_timestamp(payload["expires_at"]) - now),
             "checked_at": datetime.fromtimestamp(now, timezone.utc).isoformat()}

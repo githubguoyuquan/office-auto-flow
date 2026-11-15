@@ -99,6 +99,31 @@ class HTTPAdmissionTests(unittest.TestCase):
         return issue_license(request, self.private, "test-password-only", "HTTP test", days=7,
                              now=1800000000).decode()
 
+    def test_business_api_cannot_override_the_registered_module(self):
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        from offline_license import canonical_payload
+        value = json.loads(self.document())
+        value["payload"]["features"] = ["future_business"]
+        key = load_pem_private_key(self.private, password=b"test-password-only")
+        value["signature"] = base64.b64encode(key.sign(canonical_payload(value["payload"]))).decode()
+        code, result = self.post("/api/license/import", {"document": json.dumps(value)})
+        self.assertEqual(code, 200, result)
+        self.assertTrue(result["license"]["valid"])
+        self.assertEqual(result["license"]["features"], ["future_business"])
+        self.post("/api/print-settings", {"original_dir": str(self.root / "pdf"), "template_id": ""})
+        operations = [
+            {"name": "工艺单打印", "kind": "process_sheet", "module_id": "process_sheet",
+             "url": "https://oa.example.test/activiti/html/plm/styleManage/newStyleManage.html"},
+            {"name": "未来测试业务", "module_id": "future_business", "url": "https://oa.example.test/other"},
+        ]
+        with patch.object(app, "business_operations", return_value=operations):
+            code, result = self.post("/api/run", {"name": "工艺单打印", "style_code": "TEST123", "module_id": "future_business"})
+            self.assertEqual(code, 400)
+            self.assertIn("不包含此功能", result["error"])
+            self.assertFalse(app.CONTROLLER.task_active)
+            self.assertEqual(self.post("/api/run", {"name": "未来测试业务", "module_id": "process_sheet"})[0], 200)
+        self.assertEqual(app.CONTROLLER.jobs.get_nowait()["module_id"], "future_business")
+
     def test_export_and_import_require_token(self):
         self.assertEqual(self.post("/api/license/request", {}, False)[0], 403)
         self.assertEqual(self.post("/api/license/import", {"document": self.document()}, False)[0], 403)

@@ -37,7 +37,7 @@ class LicenseManager:
             content = stream.read(MAX_LICENSE_BYTES + 1)
         return content
 
-    def require_valid(self, force=False):
+    def require_valid(self, force=False, *, feature=None):
         with self.lock:
             if not self.keys:
                 raise LicenseError("此工作台尚未配置签发公钥，请联系管理员构建授权版本。")
@@ -49,7 +49,7 @@ class LicenseManager:
             verify_license(content, self.keys, self.device)
             if force:
                 self.clock.now(force=True)
-            return validate_license(content, self.keys, self.device, self.clock)
+            return validate_license(content, self.keys, self.device, self.clock, feature=feature)
 
     def install(self, content):
         with self.lock:
@@ -57,7 +57,7 @@ class LicenseManager:
                 raise LicenseError("此工作台尚未配置签发公钥，请联系管理员。")
             verify_license(content, self.keys, self.device)
             self.clock.now(force=True)
-            result = validate_license(content, self.keys, self.device, self.clock)
+            result = validate_license(content, self.keys, self.device, self.clock, feature=None)
             self.path.parent.mkdir(parents=True, exist_ok=True)
             temporary = self.path.with_name(f".license-{secrets.token_hex(8)}.tmp")
             try:
@@ -70,7 +70,7 @@ class LicenseManager:
 
     def status(self):
         """Polling reads local state only; the explicit check/task endpoints do I/O."""
-        result = {"valid": False, "code": "unlicensed", "device_id": ""}
+        result = {"valid": False, "code": "unlicensed", "device_id": "", "features": []}
         try:
             result["device_id"] = self.device
             if not self.keys:
@@ -79,9 +79,7 @@ class LicenseManager:
                 content = self._read()
                 payload = verify_license(content, self.keys, self.device)
                 result.update(license_id=payload["license_id"], expires_at=payload["expires_at"],
-                              customer=payload.get("customer", ""))
-                if "process_sheet" not in payload["features"]:
-                    raise LicenseError("授权不包含工艺单功能。")
+                              customer=payload.get("customer", ""), features=list(payload["features"]))
                 try:
                     now = self.clock.cached_now()
                 except LicenseError:
