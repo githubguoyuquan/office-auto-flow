@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 from trim_template import _records, export_trim_xlsx
 from license_manager import LicenseManager
 from customer_profile import PROFILE, business_url, compatibility_host
+from material_suppliers import MaterialSupplierLookup
 
 
 APP_NAME = "oa-login-cli"
@@ -249,7 +250,8 @@ def read_style_codes(filename: str, encoded: str) -> List[str]:
 
 
 def business_operations(settings: dict) -> List[dict]:
-    return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings))]
+    return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings),
+                 supplier_lookup_enabled=PROFILE["supplier_lookup"]["enabled"])]
 
 
 def visible_locator(
@@ -802,6 +804,61 @@ class AutomationController:
             page.wait_for_timeout(250)
         raise RuntimeError(f"工艺单列表初始化超时，当前页面：{page.url}。请检查 OA 页面提示或脚本加载状态。")
 
+    def _post_oa_json(self, context: Any, page: Any, operation: dict,
+                      path: str, data: dict, step: str = "query") -> dict:
+        base = urljoin(operation["url"], PROFILE["api_base_path"])
+        for attempt in range(2):
+            self.check_cancelled()
+            response = context.request.post(
+                urljoin(base, path), data=data,
+                headers={"Content-Type": "application/json"}, timeout=60_000,
+            )
+            expired = response.status in (401, 403) or urlparse(response.url).path.lower().endswith("/login.html")
+            if not expired:
+                break
+            if operation.get("batch_isolated"):
+                operation["_batch_auth_failure"].set()
+                operation["_batch_abort"].set()
+                raise RuntimeError("OA 登录已失效，已停止并发任务。")
+            if attempt or not operation.get("login_url"):
+                raise RuntimeError("OA 接口拒绝访问，请检查登录状态或账号权限。")
+            for cookie in context.cookies(operation["url"]):
+                if cookie["name"] == "is_login":
+                    context.clear_cookies(name="is_login", domain=cookie["domain"], path=cookie["path"])
+            page.goto(operation["login_url"], wait_until="commit", timeout=60_000)
+            self._wait_for_login(page, operation)
+            self.update("reading", "登录完成，正在继续接口请求…", step=step)
+        self.check_cancelled()
+        if not response.ok:
+            raise RuntimeError(f"OA 接口请求失败：HTTP {response.status}。")
+        try:
+            payload = response.json()
+        except Exception as error:
+            if operation.get("batch_isolated"):
+                operation["_batch_auth_failure"].set()
+                operation["_batch_abort"].set()
+            raise RuntimeError("OA 接口没有返回 JSON，可能需要重新登录。") from error
+        if not isinstance(payload, dict) or payload.get("code") != 10000:
+            message = payload.get("message", "响应格式异常") if isinstance(payload, dict) else "响应格式异常"
+            raise RuntimeError(f"OA 接口返回错误：{message}")
+        return payload
+
+    def _supplier_export_options(self, context: Any, page: Any, operation: dict) -> dict:
+        settings = PROFILE["supplier_lookup"]
+        if not settings["enabled"]:
+            return {}
+        lookup = MaterialSupplierLookup(
+            lambda path, data: self._post_oa_json(context, page, operation, path, data, step="suppliers"),
+            settings,
+        )
+
+        def find_suppliers(code: str) -> tuple:
+            self.check_cancelled()
+            self.update("reading", f"正在查询辅料 {code} 的供应商…", step="suppliers")
+            return lookup(code)
+
+        return {"supplier_lookup": find_suppliers, "material_header": settings["material_header"]}
+
     def _print_process_sheets(self, context: Any, page: Any, operation: dict) -> dict:
         from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
@@ -828,40 +885,7 @@ class AutomationController:
         ])
 
         def post_oa(path: str, data: dict) -> dict:
-            for attempt in range(2):
-                self.check_cancelled()
-                response = context.request.post(
-                    urljoin(config["base"], path), data=data,
-                    headers={"Content-Type": "application/json"}, timeout=60_000,
-                )
-                expired = response.status in (401, 403) or urlparse(response.url).path.lower().endswith("/login.html")
-                if not expired:
-                    break
-                if operation.get("batch_isolated"):
-                    operation["_batch_auth_failure"].set()
-                    operation["_batch_abort"].set()
-                    raise RuntimeError("OA 登录已失效，已停止并发任务。")
-                if attempt or not operation.get("login_url"):
-                    raise RuntimeError("OA 接口拒绝访问，请检查登录状态或账号权限。")
-                for cookie in context.cookies(operation["url"]):
-                    if cookie["name"] == "is_login":
-                        context.clear_cookies(name="is_login", domain=cookie["domain"], path=cookie["path"])
-                page.goto(operation["login_url"], wait_until="commit", timeout=60_000)
-                self._wait_for_login(page, operation)
-                self.update("reading", "登录完成，正在继续接口请求…", step="query")
-            if not response.ok:
-                raise RuntimeError(f"OA 接口请求失败：HTTP {response.status}。")
-            try:
-                payload = response.json()
-            except Exception as error:
-                if operation.get("batch_isolated"):
-                    operation["_batch_auth_failure"].set()
-                    operation["_batch_abort"].set()
-                raise RuntimeError("OA 接口没有返回 JSON，可能需要重新登录。") from error
-            if not isinstance(payload, dict) or payload.get("code") != 10000:
-                message = payload.get("message", "响应格式异常") if isinstance(payload, dict) else "响应格式异常"
-                raise RuntimeError(f"OA 接口返回错误：{message}")
-            return payload
+            return self._post_oa_json(context, page, operation, path, data)
 
         rows = []
         page_number = 1
@@ -960,10 +984,15 @@ class AutomationController:
                 version += 1
             try:
                 conversion = export_trim_xlsx(template_path, trim_tables, converted_xlsx,
-                                              shared_fields={fields["template_style"]: official_style})
+                    shared_fields={fields["template_style"]: official_style},
+                    **self._supplier_export_options(context, page, operation))
+            except Cancelled:
+                raise
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
+            if conversion["supplier_missing"]:
+                printed.append(f"提示：{conversion['supplier_missing']} 行辅料没有供应商信息，对应供应商单元格留空。")
         return {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
 
     def _worker_loop(self) -> None:
@@ -1076,9 +1105,17 @@ class AutomationController:
                         destination = directory / f"{stem}_{version}.xlsx"
                         version += 1
                     template = data_dir() / "templates" / f"{operation['print_settings']['template_id']}.xlsx"
-                    conversion = export_trim_xlsx(template, [table], destination)
+                    supplier_options = self._supplier_export_options(primary_context, page, operation) if phase == "done" else {}
+                    conversion = export_trim_xlsx(template, [table], destination, **supplier_options)
                     lines.append(f"辅料汇总 XLSX：{destination}（{conversion['rows']} 条）")
+                    if conversion["supplier_missing"]:
+                        lines.append(f"提示：{conversion['supplier_missing']} 行辅料没有供应商信息，对应供应商单元格留空。")
+                    if phase != "done" and PROFILE["supplier_lookup"]["enabled"]:
+                        lines.append("本批任务未完整完成，已保留基础辅料汇总，供应商信息尚未补充。")
                     message += " 已生成辅料汇总文件。"
+                except Cancelled:
+                    phase = "cancelled"
+                    message = "任务已停止，供应商查询未完成；已保存的工艺单 PDF 保留。"
                 except Exception as error:
                     phase = "error" if phase != "cancelled" else phase
                     message += f" 辅料汇总失败：{error}"
@@ -1509,7 +1546,7 @@ PAGE_HTML = r'''<!doctype html>
   function canRun(item){if(!licenseState.valid||licenseChecking||exiting||!item||runningPhases.has(currentTask.phase)||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
   function renderTimeline(item){
     const steps=isPrintOperation(item)?[['open','打开业务页'],['query','查询款号'],['select','获取工艺单'],['save_pdf','保存完整 PDF']]:[['open','打开业务页'],['read','读取页面内容']];
-    if(isPrintOperation(item)&&$('templateHistory').value)steps.push(['convert','生成辅料 XLSX']);
+    if(isPrintOperation(item)&&$('templateHistory').value){if(item.supplier_lookup_enabled)steps.push(['suppliers','查询辅料供应商']);steps.push(['convert','生成辅料 XLSX'])}
     const progress=item?.name===currentTask.operation?currentTask:{phase:'idle',step:'open',login_encountered:false};
     if(progress.login_encountered)steps.splice(1,0,['login','完成登录']);
     const index=Math.max(0,steps.findIndex(([key])=>key===(progress.step||'open')));

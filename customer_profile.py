@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+from material_suppliers import DEFAULT_SUPPLIER_LOOKUP, validate_supplier_settings
 
 DEFAULTS = {
     "customer_id": "common",
@@ -12,6 +13,7 @@ DEFAULTS = {
     "detail_endpoint": "bomTitle/printProcessSheet",
     "api_base_path": "/activiti/",
     "query_defaults": {"dataType": "Z400"},
+    "supplier_lookup": DEFAULT_SUPPLIER_LOOKUP,
     "fields": {
         "query_style": "styleCode", "row_style": "styleCode",
         "row_id": "bomTitleId", "row_sequence": "seqNo",
@@ -27,6 +29,7 @@ def load_profile(path=None):
     if not isinstance(value, dict) or set(value) - set(DEFAULTS):
         raise ValueError("客户配置包含未知项目。")
     profile = {**DEFAULTS, **value}
+    profile["supplier_lookup"] = validate_supplier_settings(profile["supplier_lookup"])
     for key in ("fields", "query_defaults"):
         if not isinstance(profile[key], dict):
             raise ValueError(f"客户配置 {key} 必须是字段映射。")
