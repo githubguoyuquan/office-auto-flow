@@ -66,7 +66,7 @@ def build_script(payload: Path, output: Path, version: str) -> str:
     dirs = sorted((p for p in payload.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True)
     remove_files = "\n".join('  Delete "$INSTDIR\\' + nsis_path(str(p.relative_to(payload)).replace("/", "\\")) + '"' for p in files)
     remove_dirs = "\n".join('  RMDir "$INSTDIR\\' + nsis_path(str(p.relative_to(payload)).replace("/", "\\")) + '"' for p in dirs)
-    payload_path = nsis_path(str(payload))
+    payload_path = nsis_path(str(payload).replace("/", "\\"))
     output_path = nsis_path(str(output))
     return f'''Unicode true
 !include "MUI2.nsh"
@@ -121,7 +121,7 @@ Section "安装工作台" SEC_MAIN
   Call CheckWritableRuntime
   SetOutPath "$INSTDIR"
   SetOverwrite on
-  File /r "{payload_path}/*"
+  File /r "{payload_path}\\*"
 {cleanup}
   WriteUninstaller "$INSTDIR\\Uninstall.exe"
   CreateDirectory "$SMPROGRAMS\\Office Auto Flow API"
