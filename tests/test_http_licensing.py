@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import oa_login_cli as app
 from license_issuer import create_keys, issue_license
@@ -88,7 +88,7 @@ class HTTPAdmissionTests(unittest.TestCase):
         request = Request(f"http://127.0.0.1:{self.server.server_port}" + path,
                           data=json.dumps(body).encode(), headers=headers)
         try:
-            with urlopen(request, timeout=10) as response:
+            with build_opener(ProxyHandler({})).open(request, timeout=10) as response:
                 return response.status, json.loads(response.read())
         except HTTPError as error:
             return error.code, json.loads(error.read())
