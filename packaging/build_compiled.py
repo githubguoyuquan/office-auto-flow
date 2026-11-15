@@ -14,6 +14,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py")
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+
 
 def load_public_keys(path):
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
