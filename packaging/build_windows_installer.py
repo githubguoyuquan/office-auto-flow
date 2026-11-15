@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PAYLOAD = ROOT / "preview" / "Office-Auto-Flow-API-67b91cf"
 DEFAULT_OUTPUT = ROOT / "preview" / "Office-Auto-Flow-API-Setup-67b91cf-win-x64.exe"
+
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
 
 
 def make_icon(destination: Path) -> None:
