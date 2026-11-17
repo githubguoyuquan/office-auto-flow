@@ -1,8 +1,11 @@
 from pathlib import Path
+import errno
+import json
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -10,6 +13,77 @@ from pptx_service import ExtractionCancelled, invoke, prepare_request, load_sett
 
 
 class PptxServiceTests(unittest.TestCase):
+    def test_corrupt_configuration_and_invalid_options_are_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'pptx-settings.json'
+            for value in ({'rules':None}, {'mapping':[True]}, {'template':[]},
+                          {'rules':[{'source':'a','target':0},{'source':' A ','target':1}]}):
+                with self.subTest(value=value):
+                    path.write_text(json.dumps(value), encoding='utf-8')
+                    with self.assertRaisesRegex(ValueError, '配置无法读取'):
+                        load_settings(tmp)
+            with self.assertRaises(ValueError):
+                prepare_request([])
+
+    def test_blocked_stdin_and_closed_stdout_remain_cancellable(self):
+        scripts=['import time; time.sleep(30)',
+                 'import json,sys,os,time; json.load(sys.stdin); os.close(1); time.sleep(30)']
+        for script in scripts:
+            with self.subTest(script=script):
+                mock,processes=self.fake_component(script)
+                cancel=threading.Event();timer=threading.Timer(0.3,cancel.set)
+                started=time.monotonic();timer.start()
+                try:
+                    with mock,self.assertRaises(ExtractionCancelled):
+                        invoke({'action':'analyze_template','padding':'x'*1024*1024}, cancel,
+                               lambda event:None,binary='test',timeout=5)
+                finally:
+                    timer.cancel()
+                self.assertLess(time.monotonic()-started,5)
+                self.assertIsNotNone(processes[0].poll())
+
+    def test_invalid_and_oversized_component_events_fail_cleanly(self):
+        for output in ('[]', '{"type":[]}', '{"type":"done","output":"x"}',
+                       '{"type":"template","headers":["a"],"fields":["a"],"mapping":[true]}',
+                       'not json', 'x'*(1024*1024+1)):
+            with self.subTest(length=len(output)):
+                # Transfer fixture text through a file to avoid Windows command length limits.
+                with tempfile.TemporaryDirectory() as tmp:
+                    fixture=Path(tmp)/'event.txt';fixture.write_text(output,encoding='utf-8')
+                    script=f'import json,sys,pathlib; json.load(sys.stdin); print(pathlib.Path({str(fixture)!r}).read_text(encoding="utf-8"))'
+                    mock,processes=self.fake_component(script)
+                    with mock,self.assertRaises(ValueError):
+                        invoke({'action':'analyze_template'},threading.Event(),lambda event:None,binary='test')
+                    self.assertIsNotNone(processes[0].poll())
+
+    def test_copy_fallback_handles_unsupported_links_and_disk_failure(self):
+        script='''import json,sys,pathlib
+r=json.load(sys.stdin); p=pathlib.Path(r["output_dir"])/"out.xlsx";p.write_bytes(b"complete workbook")
+print(json.dumps({"type":"done","output":str(p),"success":1,"failed":0,"count":2}))
+'''
+        for disk_failure in (False,True):
+            with self.subTest(disk_failure=disk_failure),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);old=root/'面辅料汇总.xlsx';old.write_bytes(b'old')
+                mock,processes=self.fake_component(script)
+                with mock,patch('pptx_service.os.link',side_effect=OSError(errno.ENOTSUP,'unsupported')):
+                    if disk_failure:
+                        with patch('pptx_service.os.fsync',side_effect=OSError(errno.ENOSPC,'disk full')):
+                            with self.assertRaises(OSError):
+                                invoke({'action':'extract','inputs':['a.pptx'],'output_dir':tmp},threading.Event(),lambda event:None,binary='test')
+                        self.assertEqual(list(root.iterdir()),[old])
+                    else:
+                        result=invoke({'action':'extract','inputs':['a.pptx'],'output_dir':tmp},threading.Event(),lambda event:None,binary='test')
+                        self.assertEqual(Path(result['output']).read_bytes(),b'complete workbook')
+                self.assertEqual(old.read_bytes(),b'old')
+                self.assertFalse(list(root.glob('.pptx-*')))
+
+    def test_missing_batch_source_is_left_for_per_file_error_reporting(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            template=Path(tmp)/'t.xlsx';template.touch()
+            missing=Path(tmp)/'deleted.pptx'
+            request=prepare_request({'template':str(template),'inputs':[str(missing)]})
+            self.assertEqual(request['inputs'],[str(missing.resolve())])
+
     def test_settings_persist_and_invalid_update_keeps_previous(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp); template=root/'t.xlsx'; template.touch()
