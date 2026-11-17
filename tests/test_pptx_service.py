@@ -6,10 +6,24 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from pptx_service import ExtractionCancelled, invoke, prepare_request
+from pptx_service import ExtractionCancelled, invoke, prepare_request, load_settings, save_settings
 
 
 class PptxServiceTests(unittest.TestCase):
+    def test_settings_persist_and_invalid_update_keeps_previous(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); template=root/'t.xlsx'; template.touch()
+            self.assertEqual(load_settings(root)['rules'], [])
+            analysis={'headers':['款号'], 'mapping':[0], 'fields':['款号']*19}
+            with patch('pptx_service.invoke', return_value=analysis):
+                body={'template':str(template), 'rules':[{'source':'样式','target':0}], 'mapping':[0], 'output_dir':tmp}
+                save_settings(root, body)
+                previous=load_settings(root)
+                for invalid in (dict(body,mapping=[99]),dict(body,rules=[{'source':'','target':0}])):
+                    with self.assertRaises(ValueError):
+                        save_settings(root, invalid)
+                    self.assertEqual(load_settings(root), previous)
+
     def fake_component(self, script):
         original = subprocess.Popen
         processes = []

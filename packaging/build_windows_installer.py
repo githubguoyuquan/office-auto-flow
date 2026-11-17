@@ -191,7 +191,7 @@ def main() -> int:
         manifest = json.loads((payload / "build-manifest.json").read_text(encoding="utf-8"))
         if manifest.get("target") != "workbench" or manifest.get("platform") != "win32" or not manifest.get("public_key_ids"):
             parser.error("编译产物的平台或公钥配置不正确")
-        for name in ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py"):
+        for name in ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "pptx_ui.py"):
             if manifest.get("sources", {}).get(name) != hashlib.sha256((ROOT / name).read_bytes()).hexdigest():
                 parser.error(f"编译产物与当前源代码不一致：{name}")
         profile_path = ROOT / "customer-profile.json"
@@ -204,7 +204,7 @@ def main() -> int:
         if manifest.get("executable_sha256") != hashlib.sha256((payload / "AIOA.exe").read_bytes()).hexdigest():
             parser.error("编译程序校验失败")
         for path in payload.rglob("*"):
-            if path.is_file() and path.name in {"oa_login_cli.py", "license_issuer.py", "private-key.pem", "offline_license.py", "license_manager.py", "license_keys.py", "trim_template.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py"}:
+            if path.is_file() and path.name in {"oa_login_cli.py", "license_issuer.py", "private-key.pem", "offline_license.py", "license_manager.py", "license_keys.py", "trim_template.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "pptx_ui.py"}:
                 parser.error("客户安装包不得包含应用源码、签发工具或私钥")
     elif (payload / "oa_login_cli.py").read_bytes() != (ROOT / "oa_login_cli.py").read_bytes():
         parser.error("payload 的应用代码与当前分支不一致")

@@ -27,6 +27,8 @@ from license_manager import LicenseManager
 from pptx_service import (ExtractionCancelled, choose_files, executable as pptx_executable,
                           invoke as invoke_pptx, prepare_request as prepare_pptx_request,
                           validate_file as validate_pptx_file)
+from pptx_service import load_settings as load_pptx_settings, save_settings as save_pptx_settings
+from pptx_ui import PPTX_UI
 from customer_profile import PROFILE, business_url, compatibility_host
 from material_suppliers import (MaterialSupplierLookup, MAX_MAPPING_BYTES, load_supplier_mapping,
                                 save_supplier_mapping, supplier_mapping_status, supplier_names)
@@ -256,7 +258,9 @@ def read_style_codes(filename: str, encoded: str) -> List[str]:
 
 def business_operations(settings: dict) -> List[dict]:
     return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings),
-                 supplier_lookup_enabled=PROFILE["supplier_lookup"]["enabled"])]
+                 supplier_lookup_enabled=PROFILE["supplier_lookup"]["enabled"]),
+            {"name":"PPTX 面辅料提取", "kind":"pptx_extract", "module_id":"pptx_material_extract",
+             "url":"本地文件", "description":"选择 PPTX 和 Excel 模板，将面辅料数据汇总到一个表格。"}]
 
 
 def visible_locator(
@@ -708,7 +712,7 @@ class AutomationController:
                             content="\n".join(messages[-MAX_OUTPUT_LINES:]))
         try:
             result = invoke_pptx(request, self.cancel_event, publish, binary=binary)
-            self.update("success", f"提取完成：成功 {result['success']} 个，失败 {result['failed']} 个。",
+            self.update("done", f"提取完成：成功 {result['success']} 个，失败 {result['failed']} 个。",
                         step="export", output_path=result["output"],
                         content="\n".join([f"已保存：{result['output']}"] + messages[-MAX_OUTPUT_LINES:]))
         except ExtractionCancelled:
@@ -1657,10 +1661,13 @@ PAGE_HTML = r'''<!doctype html>
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   const refreshTimer=setInterval(refresh,1300);
   exitButton.addEventListener('click',async()=>{if(runningPhases.has(currentTask.phase)&&!confirm('当前任务正在运行，退出会停止任务。确定退出工作台吗？'))return;exiting=true;exitButton.disabled=true;exitButton.textContent='正在退出…';try{await api('/api/shutdown','POST',{});clearInterval(refreshTimer);$('statusMessage').textContent='正在停止任务并关闭自动化浏览器，请稍候…';$('runButton').disabled=true;$('stopButton').disabled=true;const timer=setInterval(async()=>{try{await api('/api/state')}catch(_){clearInterval(timer);$('statusMessage').textContent='工作台服务已停止，可以关闭此页面。';exitButton.textContent='工作台已退出'}},1000)}catch(error){exiting=false;exitButton.disabled=false;exitButton.textContent='退出工作台';toast(error.message)}});
+  __PPTX_UI__
   refresh();
 </script>
 </body>
 </html>'''
+
+PAGE_HTML = PAGE_HTML.replace("__PPTX_UI__", PPTX_UI)
 
 
 CONTROLLER = AutomationController()
@@ -1708,7 +1715,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             limit = MAX_MAPPING_BYTES * 2
         elif self.path == "/api/run":
             limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
-        elif self.path in {"/api/pptx/run", "/api/pptx/template"}:
+        elif self.path in {"/api/pptx/run", "/api/pptx/template", "/api/pptx/settings"}:
             limit = 4 * 1024 * 1024
         else:
             limit = MAX_BODY_BYTES
@@ -1731,6 +1738,11 @@ class LocalHandler(BaseHTTPRequestHandler):
                 print_settings = load_print_settings()
             self._send(200, {"operations": operations, "settings": settings, "print_settings": print_settings, "task": CONTROLLER.snapshot(), "license": LICENSES.status(),
                              "supplier_mapping": supplier_mapping_status(data_dir())})
+        elif self.path == "/api/pptx/settings" and self._authorized():
+            try:
+                self._send(200, load_pptx_settings(data_dir()))
+            except ValueError as error:
+                self._send(400, {"error":str(error)})
         else:
             self._send(404, {"error": "页面不存在。"})
 
@@ -1740,7 +1752,13 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
-            if self.path == "/api/pptx/files":
+            if self.path == "/api/pptx/settings":
+                if CONTROLLER.task_active:
+                    raise ValueError("请等待任务完成后再更新提取配置。")
+                with CONFIG_LOCK:
+                    result = save_pptx_settings(data_dir(), body)
+                self._send(200, result)
+            elif self.path == "/api/pptx/files":
                 if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
                     raise ValueError("文件选择窗口已打开。")
                 try:

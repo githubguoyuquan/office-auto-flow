@@ -14,6 +14,51 @@ class ExtractionCancelled(Exception):
     pass
 
 
+def load_settings(directory):
+    path = Path(directory) / "pptx-settings.json"
+    if not path.exists():
+        return {"template": "", "output_dir": "", "rules": [], "mapping": []}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError()
+        return value
+    except (ValueError, OSError):
+        raise ValueError("PPTX 配置无法读取，请重新保存配置。")
+
+
+def save_settings(directory, body):
+    template = validate_file(body.get("template"), "xlsx")
+    rules, mapping = body.get("rules", []), body.get("mapping")
+    if not isinstance(rules, list) or len(rules) > 500:
+        raise ValueError("字段别名最多 500 条。")
+    for rule in rules:
+        if (not isinstance(rule, dict) or not isinstance(rule.get("source"), str)
+                or not rule["source"].strip() or len(rule["source"]) > 100
+                or type(rule.get("target")) is not int or not 0 <= rule["target"] < 19):
+            raise ValueError("字段别名格式无效。")
+    analysis = invoke({"action":"analyze_template", "template":template, "rules":rules},
+                      threading.Event(), lambda event: None, timeout=60)
+    if mapping is None:
+        mapping = analysis["mapping"]
+    if (not isinstance(mapping, list) or len(mapping) != len(analysis["headers"])
+            or any(type(field) is not int or not -1 <= field < len(analysis["fields"]) for field in mapping)):
+        raise ValueError("模板列匹配无效，请重新分析模板。")
+    output = body.get("output_dir", "")
+    if not isinstance(output, str) or (output and not Path(output).is_dir()):
+        raise ValueError("保存目录不存在。")
+    value = {"template":template, "output_dir":output, "rules":rules, "mapping":mapping}
+    target = Path(directory) / "pptx-settings.json"
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as stream:
+        temporary = Path(stream.name)
+        json.dump(value, stream, ensure_ascii=False)
+    try:
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return dict(value, analysis=analysis)
+
+
 def choose_files(kind):
     if kind not in {"pptx", "xlsx"}:
         raise ValueError("文件类型无效。")
