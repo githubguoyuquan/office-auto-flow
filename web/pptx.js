@@ -38,6 +38,11 @@
     #pptxMappingSummary{margin-left:auto;color:var(--muted);font-size:11px;font-weight:400}
     #pptxMapping{display:grid;gap:0;max-height:280px;overflow:auto;margin-top:12px}
     #pptxMapping .pptx-map-row{display:grid;grid-template-columns:minmax(100px,1fr) minmax(140px,1fr);gap:12px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:12px}
+    #pptxMapping .pptx-target-field{text-align:right;overflow-wrap:anywhere}
+    #pptxMapping .pptx-alias-menu{border:1px solid var(--line);border-radius:8px;padding:8px 10px;min-width:0}
+    #pptxMapping .pptx-alias-menu summary{display:block;overflow-wrap:anywhere;font-size:12px}
+    #pptxMapping .pptx-alias-menu summary:before{display:none}
+    #pptxMapping .pptx-alias-menu label{display:flex;gap:8px;align-items:center;padding:8px 0}
     #pptxPanel .pptx-advanced-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
     #pptxPanel .pptx-note{display:flex;gap:6px;color:var(--muted);font-size:10px;line-height:1.6;margin:12px 2px 0}
     #pptxError{color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 30%,transparent);border-radius:10px;padding:12px;font-size:12px;line-height:1.6}
@@ -61,7 +66,7 @@
       <section class="pptx-card" aria-labelledby="pptxTemplateTitle"><div class="pptx-head"><h4 id="pptxTemplateTitle">输出模板</h4><span class="pptx-pill">XLSX</span></div><p class="pptx-path-name" id="pptxTemplateName">尚未选择模板</p><div class="picker-row"><input id="pptxTemplate" class="field" aria-label="模板完整路径" readonly placeholder="选择一个 Excel 模板"><button id="pptxChooseTemplate" type="button" class="ghost">选择模板</button></div><p class="pptx-caption">沿用模板列顺序与样式，不新增列</p></section>
       <section class="pptx-card" aria-labelledby="pptxOutputTitle"><div class="pptx-head"><h4 id="pptxOutputTitle">保存位置</h4><button id="pptxDefaultOutput" type="button" class="pptx-link">恢复默认</button></div><p class="pptx-path-name" id="pptxOutputName">首个 PPTX 所在文件夹</p><div class="picker-row"><input id="pptxOutput" class="field" aria-label="保存目录完整路径" readonly placeholder="默认使用首个 PPTX 所在目录"><button id="pptxChooseOutput" type="button" class="ghost">选择目录</button></div><p class="pptx-caption">生成“面辅料汇总.xlsx”，重名自动编号</p></section>
     </div>
-    <details id="pptxMappingDetails"><summary>字段与提取设置<span id="pptxMappingSummary">选择模板后自动匹配</span></summary><p class="pptx-caption" style="margin-top:12px">字段匹配修改后自动保存。未匹配列仍会尝试同名字段，没有数据则留空，不影响其他列提取。</p><div id="pptxMapping"></div><div class="pptx-advanced-actions"><button id="pptxAnalyze" type="button" class="ghost">恢复自动匹配</button><button id="pptxRules" type="button" class="ghost">字段别名</button><button id="pptxSave" type="button" class="ghost" hidden>重试保存</button></div></details>
+    <details id="pptxMappingDetails"><summary>字段与提取设置<span id="pptxMappingSummary">选择模板后自动匹配</span></summary><p class="pptx-caption" style="margin-top:12px">默认按原字段名自动提取，无需逐列设置。已配置的别名显示在目标字段左侧；取消勾选会移除该别名。</p><div id="pptxMapping"></div><div class="pptx-advanced-actions"><button id="pptxAnalyze" type="button" class="ghost" hidden>恢复自动匹配</button><button id="pptxRules" type="button" class="ghost">字段别名</button><button id="pptxSave" type="button" class="ghost" hidden>重试保存</button></div></details>
     <p id="pptxSaveStatus" class="pptx-caption" role="status" aria-live="polite"></p>
     <p id="pptxError" role="alert" hidden></p>
     <p class="pptx-note">◈ 无需登录 OA · 模板与设置自动记忆 · 下次只需重新选择工艺单</p>`;
@@ -74,7 +79,31 @@
   pptxCopyResult.onclick=async()=>{try{await navigator.clipboard.writeText(currentTask.output_path);toast('结果路径已复制，可粘贴到文件管理器打开')}catch{toast('无法自动复制，请在下方结果中选中路径复制')}};
   function pptxError(error){$('pptxError').textContent=error?.message||String(error);$('pptxError').hidden=false}
   function fieldSelect(value,onchange,blank=false){const select=document.createElement('select');select.className='field';if(blank){const o=document.createElement('option');o.value=-1;o.textContent='同名字段 / 留空';select.append(o)}for(const [index,name] of (pptxAnalysis?.fields||[]).entries()){const o=document.createElement('option');o.value=index;o.textContent=name;select.append(o)}select.value=String(value);select.onchange=()=>onchange(Number(select.value));return select}
-  function drawMapping(){const box=$('pptxMapping');box.replaceChildren();for(const [index,header] of (pptxAnalysis?.headers||[]).entries()){const row=document.createElement('label');row.className='pptx-map-row';const title=document.createElement('span');title.textContent=header||`第 ${index+1} 列`;row.append(title,fieldSelect(pptx.mapping[index]??-1,v=>{pptx.mapping[index]=v;pptxAction(()=>pptxSave(),'正在保存字段匹配…')},true));box.append(row)}}
+  function drawMapping(){
+    const box=$('pptxMapping');box.replaceChildren();
+    pptx.mapping=[...(pptxAnalysis?.mapping||[])];
+    for(const [index,header] of (pptxAnalysis?.headers||[]).entries()){
+      const row=document.createElement('div');row.className='pptx-map-row';
+      const left=document.createElement('div'),target=pptx.mapping[index]??-1;
+      const aliases=pptx.rules.filter(rule=>target>=0&&rule.target===target);
+      if(aliases.length){
+        const menu=document.createElement('details');menu.className='pptx-alias-menu';
+        const summary=document.createElement('summary');summary.textContent=aliases.map(rule=>rule.source).join('、');summary.setAttribute('aria-label',`${header}的字段别名`);menu.append(summary);
+        for(const rule of aliases){
+          const label=document.createElement('label'),check=document.createElement('input');check.type='checkbox';check.checked=true;check.setAttribute('aria-label',rule.source);
+          check.onchange=()=>pptxAction(async()=>{
+            const previous=pptx.rules.map(item=>({...item}));
+            try{pptx.rules=pptx.rules.filter(item=>item.source!==rule.source);await pptxAnalyze();await pptxSave();drawMapping()}
+            catch(error){pptx.rules=previous;await pptxAnalyze();throw error}
+          },'正在保存字段别名…');
+          label.append(check,document.createTextNode(rule.source));menu.append(label);
+        }
+        left.append(menu);
+      }
+      const title=document.createElement('span');title.className='pptx-target-field';title.textContent=header||`第 ${index+1} 列`;
+      row.append(left,title);box.append(row);
+    }
+  }
   function drawRules(){const box=$('pptxRuleRows');box.replaceChildren();if(!pptxRulesDraft.length){const empty=document.createElement('p');empty.className='panel-sub';empty.textContent='尚未添加别名，当前使用内置字段识别。';box.append(empty)}pptxRulesDraft.forEach((rule,index)=>{const row=document.createElement('div');row.className='pptx-rule-row';const input=document.createElement('input');input.className='field';input.placeholder='原字段名，如：用量';input.setAttribute('aria-label',`第 ${index+1} 条原字段名`);input.maxLength=100;input.value=rule.source;input.oninput=()=>{rule.source=input.value};const arrow=document.createElement('span');arrow.className='pptx-rule-arrow';arrow.textContent='→';arrow.setAttribute('aria-hidden','true');const select=fieldSelect(rule.target,v=>{rule.target=v});select.setAttribute('aria-label',`第 ${index+1} 条目标字段`);const remove=document.createElement('button');remove.type='button';remove.className='ghost';remove.textContent='删除';remove.onclick=()=>{pptxRulesDraft.splice(index,1);drawRules()};row.append(input,arrow,select,remove);box.append(row)})}
   async function pptxAnalyze(preserve=false){const result=await api('/api/pptx/template','POST',{template:pptx.template,rules:pptx.rules});pptxAnalysis=result;if(!preserve||pptx.mapping.length!==result.headers.length)pptx.mapping=result.mapping;drawMapping()}
   async function pptxSave(){if(!pptx.template){pptxSaveStatus='选择模板后将自动保存设置';return}pptxSaveStatus='正在保存…';try{const value=await api('/api/pptx/settings','POST',pptx);pptxAnalysis=value.analysis;pptxSaveStatus='设置已自动保存';pptxSaveFailed=false}catch(error){pptxSaveStatus='保存失败，请重试';pptxSaveFailed=true;throw error}}
@@ -113,8 +142,8 @@
     $('pptxChooseInputs').textContent=pptx.inputs.length?'继续添加':'选择文件';$('pptxFileFoot').hidden=!pptx.inputs.length;
     const key=JSON.stringify(pptx.inputs);
     if(key!==pptxFilesKey){pptxFilesKey=key;$('pptxInputs').replaceChildren();pptx.inputs.forEach((path,index)=>{const row=document.createElement('div');row.className='pptx-file';const name=document.createElement('span');name.textContent=pptxBaseName(path);name.title=path;const replace=document.createElement('button');replace.type='button';replace.textContent='更换';replace.dataset.action='replace';replace.setAttribute('aria-label','更换 '+pptxBaseName(path));replace.onclick=()=>replacePptx(index);const remove=document.createElement('button');remove.type='button';remove.textContent='移除';remove.dataset.action='remove';remove.setAttribute('aria-label','移除 '+pptxBaseName(path));remove.onclick=()=>{pptx.inputs.splice(index,1);renderTask()};row.append(name,replace,remove);$('pptxInputs').append(row)})}
-    $('pptxMappingSummary').textContent=pptxAnalysis?`${pptxAnalysis.headers.length} 列 · ${pptx.mapping.filter(v=>v>=0).length} 列已匹配 · ${pptx.rules.length} 条别名`:'选择模板后自动匹配';
-    for(const el of pptxPanel.querySelectorAll('button,select'))el.disabled=active||pptxBusy||!pptxReady;
+    $('pptxMappingSummary').textContent=pptxAnalysis?`${pptxAnalysis.headers.length} 列 · ${pptx.mapping.filter(v=>v>=0).length} 列自动识别 · ${pptx.rules.length} 条别名`:'选择模板后自动匹配';
+    for(const el of pptxPanel.querySelectorAll('button,select,input[type=checkbox]'))el.disabled=active||pptxBusy||!pptxReady;
     for(const id of ['pptxAnalyze','pptxRules','pptxSave'])$(id).disabled=active||pptxBusy||!pptxReady||!pptx.template;
     $('pptxSave').hidden=!pptxSaveFailed;
     $('pptxSaveStatus').textContent=pptxBusyMessage||pptxSaveStatus;
