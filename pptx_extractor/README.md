@@ -5,8 +5,8 @@
 
 ```
 go test ./...
-go build -trimpath -o pptx-extractor .
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o pptx-extractor.exe .
+go build -trimpath -o bin/pptx-extractor .
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o bin/pptx-extractor.exe .
 ```
 
 每次进程从标准输入读取一条 UTF-8 JSON 请求，标准输出返回 JSON Lines 事件；退出码 0 为成功，1 为失败。
@@ -19,4 +19,15 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o pptx-extractor.exe
 未指定 `output_dir` 时沿用首个 PPTX 目录。输出重名递增，不覆盖已有文件。
 返回 `progress`、`file`、`done` 事件；失败返回 `error`。单文件解析失败继续处理其余文件。
 
-目前仅完成内核迁入。工作台入口、设置界面、子进程管理和安装打包将在后续模块接入。
+工作台后端已接入 `pptx_service.py`，使用当前平台的 `bin/pptx-extractor` 或 `bin/pptx-extractor.exe`。
+本机编译文件不提交 Git，Windows 自动构建组件将在安装打包阶段接入。
+
+本地 POST 接口沿用工作台令牌和来源检查：
+
+- `/api/pptx/files`：`{"kind":"pptx"}` 多选输入，或 `{"kind":"xlsx"}` 选择模板；返回 `paths`。
+- `/api/pptx/template`：模板路径与可选规则，返回模板字段和默认匹配。
+- `/api/pptx/run`：批量提取请求；任务进入现有 `/api/state`，通过 `/api/stop` 停止。
+
+提取任务与 OA 任务互斥，无需启动 Playwright。取消、超时和退出都会回收提取子进程。
+输出在目标目录内的临时文件夹完成，成功后以防覆盖方式发布；失败、取消时清理暂存文件。
+本地服务到 Go 内核已验证；工作台可视入口、规则设置及安装打包尚待接入。

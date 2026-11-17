@@ -7,3 +7,4 @@ AIOA-签发密钥备份*.zip
 *.license
 /public-keys.json
 /.secrets/
+pptx_extractor/bin/

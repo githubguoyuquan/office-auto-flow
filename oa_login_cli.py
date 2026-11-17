@@ -24,6 +24,9 @@ from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse
 
 from trim_template import _records, export_trim_xlsx
 from license_manager import LicenseManager
+from pptx_service import (ExtractionCancelled, choose_files, executable as pptx_executable,
+                          invoke as invoke_pptx, prepare_request as prepare_pptx_request,
+                          validate_file as validate_pptx_file)
 from customer_profile import PROFILE, business_url, compatibility_host
 from material_suppliers import (MaterialSupplierLookup, MAX_MAPPING_BYTES, load_supplier_mapping,
                                 save_supplier_mapping, supplier_mapping_status, supplier_names)
@@ -606,6 +609,7 @@ class AutomationController:
         self.batch_local = threading.local()
         self.shutdown_event = threading.Event()
         self.worker = None
+        self.local_worker = None
         self.task_active = False
         self.state = {
             "phase": "idle",
@@ -640,6 +644,9 @@ class AutomationController:
         if not isinstance(module_id, str) or not module_id.strip():
             raise ValueError("该业务尚未配置授权模块，请联系管理员。")
         LICENSES.require_valid(feature=module_id)
+        if operation.get("kind") == "pptx_extract":
+            self._start_pptx(operation)
+            return
         with self.lock:
             if self.shutdown_event.is_set():
                 raise ValueError("工作台正在退出，无法启动新任务。")
@@ -671,6 +678,47 @@ class AutomationController:
                 self.worker.start()
             self.jobs.put(dict(operation))
 
+    def _start_pptx(self, operation: dict) -> None:
+        request = prepare_pptx_request(operation["request"])
+        binary = pptx_executable()
+        with self.lock:
+            if self.shutdown_event.is_set() or self.task_active:
+                raise ValueError("已有任务正在运行或工作台正在退出。")
+            self.cancel_event.clear()
+            self.task_active = True
+            self.state = {"phase": "running", "step": "extract", "login_encountered": False,
+                          "operation": operation["name"], "message": "正在读取 PPTX…",
+                          "title": "", "url": "", "content": "", "batch_total": len(request["inputs"]),
+                          "batch_completed": 0, "updated_at": datetime.now().strftime("%H:%M:%S")}
+            self.local_worker = threading.Thread(target=self._run_pptx, args=(request, binary), daemon=True)
+            self.local_worker.start()
+
+    def _run_pptx(self, request: dict, binary: Path) -> None:
+        completed, messages = 0, []
+        def publish(event):
+            nonlocal completed
+            if event.get("type") == "progress":
+                self.update("running", f"正在提取 {event['current']}/{event['total']}：{Path(event['input']).name}", step="extract")
+            elif event.get("type") == "file":
+                completed += 1
+                messages.extend(event.get("warnings") or [])
+                if not event.get("ok"):
+                    messages.append(f"{Path(event['input']).name}：{event.get('error', '失败')}")
+                self.update("running", "正在汇总提取数据…", step="extract", batch_completed=completed,
+                            content="\n".join(messages[-MAX_OUTPUT_LINES:]))
+        try:
+            result = invoke_pptx(request, self.cancel_event, publish, binary=binary)
+            self.update("success", f"提取完成：成功 {result['success']} 个，失败 {result['failed']} 个。",
+                        step="export", output_path=result["output"],
+                        content="\n".join([f"已保存：{result['output']}"] + messages[-MAX_OUTPUT_LINES:]))
+        except ExtractionCancelled:
+            self.update("cancelled", "提取已停止。", step="extract")
+        except Exception as error:
+            self.update("error", f"提取失败：{error}", step="extract")
+        finally:
+            with self.lock:
+                self.task_active = False
+
     def submit_credentials(self, username: str, password: str) -> None:
         with self.lock:
             if self.state["phase"] != "login_required":
@@ -695,6 +743,8 @@ class AutomationController:
         self.messages.put(("cancel",))
         if self.worker and self.worker is not threading.current_thread():
             self.worker.join()
+        if self.local_worker and self.local_worker is not threading.current_thread():
+            self.local_worker.join()
 
     def check_cancelled(self) -> None:
         batch_abort = getattr(self.batch_local, "abort", None)
@@ -1658,6 +1708,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             limit = MAX_MAPPING_BYTES * 2
         elif self.path == "/api/run":
             limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
+        elif self.path in {"/api/pptx/run", "/api/pptx/template"}:
+            limit = 4 * 1024 * 1024
         else:
             limit = MAX_BODY_BYTES
         if length < 1 or length > limit:
@@ -1688,7 +1740,27 @@ class LocalHandler(BaseHTTPRequestHandler):
             return
         try:
             body = self._body()
-            if self.path == "/api/license/request":
+            if self.path == "/api/pptx/files":
+                if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
+                    raise ValueError("文件选择窗口已打开。")
+                try:
+                    paths = choose_files(body.get("kind"))
+                finally:
+                    DIRECTORY_PICKER_LOCK.release()
+                self._send(200, {"paths": paths})
+            elif self.path == "/api/pptx/template":
+                if CONTROLLER.task_active:
+                    raise ValueError("请等待当前任务完成后再分析模板。")
+                template = validate_pptx_file(body.get("template"), "xlsx")
+                result = invoke_pptx({"action": "analyze_template", "template": template,
+                                      "rules": body.get("rules", [])}, CONTROLLER.shutdown_event,
+                                     lambda event: None, timeout=60)
+                self._send(200, result)
+            elif self.path == "/api/pptx/run":
+                CONTROLLER.start({"name": "PPTX 面辅料提取", "kind": "pptx_extract",
+                                  "module_id": "pptx_material_extract", "request": body})
+                self._send(200, {"ok": True})
+            elif self.path == "/api/license/request":
                 self._send(200, {"request": LICENSES.request()})
             elif self.path == "/api/license/check":
                 LICENSES.require_valid(force=True)

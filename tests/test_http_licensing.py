@@ -16,6 +16,18 @@ from offline_license import TrustedClock
 
 
 class HTTPAdmissionTests(unittest.TestCase):
+    def test_pptx_routes_require_token_and_do_not_open_oa(self):
+        self.assertEqual(self.post("/api/pptx/run", {}, False)[0], 403)
+        self.assertEqual(self.post("/api/pptx/files", {}, False)[0], 403)
+        with patch.object(app, "choose_files", return_value=["selected.pptx"]):
+            self.assertEqual(self.post("/api/pptx/files", {"kind":"pptx"}),
+                             (200, {"paths":["selected.pptx"]}))
+        with patch.object(app.CONTROLLER, "start") as start:
+            code, result = self.post("/api/pptx/run", {"inputs":["selected.pptx"], "module_id":"process_sheet"})
+            self.assertEqual(code, 200, result)
+            self.assertEqual(start.call_args.args[0]["module_id"], "pptx_material_extract")
+            self.assertEqual(start.call_args.args[0]["kind"], "pptx_extract")
+
     @staticmethod
     def mapping_body(name="供应商甲"):
         import io
