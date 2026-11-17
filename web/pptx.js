@@ -1,6 +1,4 @@
-"""PPTX workbench controls, embedded into the existing local page."""
 
-PPTX_UI = r'''
   const isPptx=item=>item?.kind==='pptx_extract';
   const pptxStyle=document.createElement('style');pptxStyle.textContent=`
     #pptxPanel{--pptx-accent:#28785e;margin:16px 0 0;color:var(--ink)}
@@ -130,4 +128,3 @@ PPTX_UI = r'''
   const baseTimeline=renderTimeline;renderTimeline=item=>{if(!isPptx(item)){baseTimeline(item);return}const timeline=$('taskTimeline');timeline.replaceChildren();const phase=currentTask.operation===item.name?currentTask.phase:'idle';for(const [index,label] of ['提取面辅料','汇总并保存 XLSX'].entries()){const step=document.createElement('div');step.className='step'+(phase==='done'?' complete':phase==='running'&&index===0?' active':'');const number=document.createElement('span');number.className='step-num';number.textContent=index+1;const text=document.createElement('span');text.className='step-label';text.textContent=label;step.append(number,text);timeline.append(step)}};
   $('runButton').addEventListener('click',event=>{if(!isPptx(selected()))return;event.stopImmediatePropagation();if(!canRun(selected()))return;pptxAction(async()=>{await pptxSave();await api('/api/pptx/run','POST',pptx);await refresh()})},true);
   (async()=>{try{const saved=await api('/api/pptx/settings');pptx={...pptx,...saved,inputs:[]};if(pptx.template)await pptxAnalyze(true)}catch(error){pptxError(error)}finally{pptxReady=true;renderTask()}})();
-'''

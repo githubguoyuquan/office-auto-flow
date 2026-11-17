@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "pptx_ui.py")
+APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "ui_resources.py")
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -88,6 +88,7 @@ def main():
         if not (dist / executable).is_file():
             raise RuntimeError("编译未生成预期的程序。")
         if args.target == "workbench":
+            shutil.copytree(ROOT / "web", dist / "web")
             go_root = ROOT / "pptx_extractor"
             environment = dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0")
             subprocess.run(["go", "test", "./..."], cwd=go_root, check=True)
@@ -113,6 +114,8 @@ def main():
                 "public_key_ids": sorted(keys),
                 "executable_sha256": hashlib.sha256((destination / executable).read_bytes()).hexdigest()}
     if args.target == "workbench":
+        manifest["web_resources"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                     for p in sorted((destination / "web").iterdir()) if p.is_file()}
         manifest["pptx_component_sha256"] = hashlib.sha256(
             (destination / "pptx_extractor/bin/pptx-extractor.exe").read_bytes()).hexdigest()
         manifest["pptx_sources"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()

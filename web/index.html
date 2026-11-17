@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AIOA · 自动化工作台</title>
+  <style>__WORKBENCH_CSS__</style>
+  <script>__BOOTSTRAP_JS__</script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brand-mark"><svg width="23" height="23" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 12.2 9.1 5h4.2L8.2 12.2H4Zm6.5 6.8 5.1-7.2H20L14.9 19h-4.4Z" fill="white"/><path d="M10.9 12.2 15.9 5H20l-5.1 7.2h-4Z" fill="white" opacity=".64"/></svg></div><div class="brand-copy"><div class="brand-name">AIOA</div><div class="brand-sub">AUTOMATION STUDIO</div></div></div>
+    <div class="nav-label">工作空间</div>
+    <div class="nav-item active"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></svg><span>自动化工作台</span></div>
+    <div class="side-bottom"><div class="local-row"><span class="local-dot"></span>本机服务运行中</div><div class="side-caption">任务与浏览器会话仅在这台电脑上运行。</div></div>
+  </aside>
+  <div class="main">
+    <header class="topbar"><div class="crumb">工作空间&nbsp; / &nbsp;<b>自动化工作台</b></div><div class="top-right"><span class="top-pill">LOCAL WORKSPACE</span><span class="avatar">OA</span></div></header>
+    <main class="content">
+      <p class="eyebrow">WORKSPACE / 01</p>
+      <h1 class="page-title">自动化工作台</h1>
+      <p class="page-desc">集中管理 OA 业务入口，清晰掌握每一次执行的状态与结果。</p>
+      <div class="hero"><div class="hero-kicker">WELCOME TO AIOA</div><h2>让日常业务，运行得更从容。</h2><p>选择业务操作，工作台将打开对应页面并处理登录；页面主要内容会呈现在这里。</p></div>
+      <div class="overview">
+        <div class="metric"><div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></div><div><div class="metric-label">已配置业务</div><div class="metric-value" id="countValue">—</div></div></div>
+        <div class="metric"><div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8"/><path d="m8.5 12 2.3 2.3 4.7-4.8"/></svg></div><div><div class="metric-label">当前任务</div><div class="metric-value" id="taskValue">待开始</div></div></div>
+        <div class="metric"><div class="metric-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="6" width="16" height="13" rx="2"/><path d="M8 6V4m8 2V4M4 10h16"/></svg></div><div><div class="metric-label">运行方式</div><div class="metric-value">本机浏览器</div></div></div>
+      </div>
+      <div class="workspace">
+        <section class="panel" aria-label="业务操作">
+          <div class="panel-heading"><div><p class="section-kicker">BUSINESS OPERATIONS</p><h3>业务操作</h3><div class="panel-sub">选择业务开始运行</div></div></div>
+          <div class="search-wrap"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m16 16 5 5"/></svg><input class="search" id="searchInput" placeholder="搜索业务名称或地址" aria-label="搜索业务"></div>
+          <div class="operation-list" id="operationList"></div>
+          <div class="detail"><div class="detail-head"><span class="detail-label">当前选择</span></div><div id="selectionDetail" class="detail-none">尚未选择业务操作</div></div>
+        </section>
+        <section class="panel" aria-label="运行任务">
+          <div class="panel-heading run-head"><div><p class="section-kicker">TASK EXECUTION</p><h3>运行任务</h3><div class="panel-sub">执行过程和页面结果实时更新</div></div><span class="status-badge" id="statusBadge">待开始</span></div>
+          <div class="run-body">
+            <div class="timeline" id="taskTimeline" aria-label="任务步骤"></div>
+            <div class="status-card"><div class="status-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg></div><div><div class="status-title" id="statusTitle">准备就绪</div><div class="status-message" id="statusMessage">选择左侧业务操作后，即可开始。</div></div></div>
+            <div class="login-card" id="loginCard" hidden><h4>完成 OA 登录</h4><p>在这里填写账号密码后，工具会将其填入 OA 页面。验证码请在 OA 浏览器中输入，再点击页面上的“登录”。</p><form id="loginForm"><div class="login-grid"><div><label class="field-label" for="username">用户名</label><input class="field" id="username" autocomplete="username" required></div><div><label class="field-label" for="password">密码</label><input class="field" id="password" type="password" autocomplete="current-password" required></div></div><button class="primary login-submit" type="submit" id="loginButton">填入 OA 页面</button></form></div>
+            <div class="run-actions"><button class="primary" id="runButton" disabled>开始运行</button><button class="ghost" id="stopButton" hidden>停止任务</button></div>
+            <p class="fine-print">密码不会保存；登录状态保存在本机浏览器配置中，OA 会话失效后需重新登录。</p>
+            <div class="result" id="result" hidden><div class="result-top"><h4 id="resultHeading">页面主要内容</h4><span class="result-meta" id="resultTime"></span></div><div class="result-title" id="resultTitle"></div><p class="result-url" id="resultUrl"></p><pre id="resultContent"></pre></div>
+          </div>
+        </section>
+      </div>
+      <div class="guide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg><div><strong>当前版本说明</strong><p>已支持业务入口管理、登录协助和页面内容读取。单号查询、列表筛选及勾选操作将在后续业务规则明确后接入。</p></div></div>
+    </main>
+  </div>
+</div>
+<div class="toast" id="toast" role="status"></div>
+<script>__WORKBENCH_JS__</script>
+</body>
+</html>
