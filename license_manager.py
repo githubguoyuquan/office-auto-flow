@@ -11,7 +11,8 @@ from offline_license import (LicenseError, MAX_LICENSE_BYTES, PRODUCT, TrustedCl
 
 
 class LicenseManager:
-    def __init__(self, directory, public_keys=None, clock=None, device=None):
+    def __init__(self, directory, public_keys=None, clock=None, device=None, *, unrestricted=False):
+        self.unrestricted = unrestricted
         self.directory = directory
         self.keys = PUBLIC_KEYS if public_keys is None else public_keys
         self.clock = clock or TrustedClock()
@@ -38,6 +39,8 @@ class LicenseManager:
         return content
 
     def require_valid(self, force=False, *, feature=None):
+        if self.unrestricted:
+            return self.status()
         with self.lock:
             if not self.keys:
                 raise LicenseError("此工作台尚未配置签发公钥，请联系管理员构建授权版本。")
@@ -70,6 +73,9 @@ class LicenseManager:
 
     def status(self):
         """Polling reads local state only; the explicit check/task endpoints do I/O."""
+        if self.unrestricted:
+            return {"valid": True, "code": "unrestricted", "unrestricted": True,
+                    "device_id": "", "features": [], "message": "当前版本全部模块开放，无需导入许可证。"}
         result = {"valid": False, "code": "unlicensed", "device_id": "", "features": []}
         try:
             result["device_id"] = self.device

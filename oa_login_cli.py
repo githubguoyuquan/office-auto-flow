@@ -1517,8 +1517,10 @@ PAGE_HTML = r'''<!doctype html>
   const licenseButton=document.createElement('button');licenseButton.type='button';licenseButton.className='theme-toggle';licenseButton.id='licenseButton';licenseButton.textContent='授权管理';document.querySelector('.top-right').prepend(licenseButton);
   const licenseModal=document.createElement('div');licenseModal.className='modal-backdrop';licenseModal.id='licenseModal';licenseModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="licenseTitle"><div class="modal-top"><h3 id="licenseTitle">软件授权</h3><button class="ghost" id="closeLicense" type="button">关闭</button></div><p id="licenseMessage" role="status"></p><label class="field-label">设备码</label><input id="licenseDevice" class="field" readonly><p id="licenseDetails" class="panel-sub"></p><div class="modal-actions" style="flex-wrap:wrap"><button id="exportRequest" class="ghost" type="button">导出设备申请</button><button id="checkLicense" class="ghost" type="button">联网校验</button><button id="importLicense" class="primary" type="button">导入授权文件</button></div><input id="licenseFile" type="file" accept=".license,application/json" hidden><p class="panel-sub">首次激活、工作台重启后及每隔 24 小时需要联网校时。当前任务可执行完成；到期后无法开始新任务。</p></section>`;document.body.append(licenseModal);
   const licensedModules=document.createElement('p');licensedModules.id='licensedModules';licensedModules.className='panel-sub';$('licenseDetails').after(licensedModules);
-  function moduleAllowed(item){return licenseState.valid&&Array.isArray(licenseState.features)&&licenseState.features.includes(item?.module_id)}
+  function moduleAllowed(item){return licenseState.valid&&(licenseState.unrestricted||Array.isArray(licenseState.features)&&licenseState.features.includes(item?.module_id))}
   function renderLicense(){licenseButton.textContent=licenseState.valid?'授权有效':'授权管理';$('licenseMessage').textContent=licenseChecking?'正在联网校验时间…':licenseState.message||'尚未授权';$('licenseDevice').value=licenseState.device_id||'';$('licenseDetails').textContent=licenseState.expires_at?'授权到期：'+new Date(licenseState.expires_at).toLocaleString('zh-CN')+(licenseState.valid?' · 剩余 '+Math.ceil(licenseState.remaining_seconds/86400)+' 天':'')+(licenseState.customer?' · '+licenseState.customer:''):'';const features=licenseState.features||[];licensedModules.textContent='许可证模块范围：'+(features.length?features.map(id=>operations.find(item=>item.module_id===id)?.name||id).join('、'):'尚未授权');$('checkLicense').disabled=licenseChecking;$('importLicense').disabled=licenseChecking||runningPhases.has(currentTask.phase)}
+  const renderRestrictedLicense=renderLicense;
+  renderLicense=()=>{renderRestrictedLicense();if(licenseState.unrestricted){licenseButton.textContent='全部开放';licensedModules.textContent='模块范围：全部业务';$('licenseDevice').closest('section').querySelectorAll('.field-label,#licenseDevice,.modal-actions,.panel-sub:last-child').forEach(el=>el.hidden=true)}};
   licenseButton.onclick=()=>{renderLicense();licenseModal.classList.add('open')};$('closeLicense').onclick=()=>licenseModal.classList.remove('open');
   async function checkLicense(){if(licenseChecking)return;licenseChecking=true;renderLicense();try{const result=await api('/api/license/check','POST',{});licenseState=result.license}catch(error){licenseState={...licenseState,valid:false,message:error.message};toast(error.message)}finally{licenseChecking=false;renderLicense();renderTask()}}
   $('checkLicense').onclick=checkLicense;
@@ -1613,7 +1615,7 @@ PAGE_HTML = r'''<!doctype html>
 
 CONTROLLER = AutomationController()
 ACCESS_TOKEN = secrets.token_urlsafe(32)
-LICENSES = LicenseManager(data_dir)
+LICENSES = LicenseManager(data_dir, unrestricted=True)
 
 
 class LocalHandler(BaseHTTPRequestHandler):
