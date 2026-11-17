@@ -1727,6 +1727,7 @@ def run() -> int:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--self-test"]:
         from license_keys import PUBLIC_KEYS
+        from update_keys import BASE_RELEASE_SEQUENCE, UPDATE_PUBLIC_KEYS
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
         from playwright._impl._driver import compute_driver_executable
         from openpyxl import Workbook
@@ -1734,11 +1735,18 @@ if __name__ == "__main__":
             raise SystemExit("No embedded public keys configured.")
         for public in PUBLIC_KEYS.values():
             Ed25519PublicKey.from_public_bytes(public)
+        if (not UPDATE_PUBLIC_KEYS or set(UPDATE_PUBLIC_KEYS) & set(PUBLIC_KEYS)
+                or type(BASE_RELEASE_SEQUENCE) is not int or BASE_RELEASE_SEQUENCE < 1):
+            raise SystemExit("Independent update verification keys are required.")
+        for public in UPDATE_PUBLIC_KEYS.values():
+            Ed25519PublicKey.from_public_bytes(public)
         node, driver = compute_driver_executable()
         if not Path(node).is_file() or not Path(driver).is_file():
             raise SystemExit("Bundled Playwright driver is missing.")
         workbook = Workbook()
         workbook.close()
+        UpdateManager.healthcheck(Path(__file__).resolve().parent)
+        print("AIOA compiled update resources and verification keys OK")
         print("AIOA compiled self-test OK")
     elif sys.argv[1:] == ["--browser-smoke"]:
         from playwright.sync_api import sync_playwright

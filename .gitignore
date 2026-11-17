@@ -4,7 +4,11 @@ __pycache__/
 *.pyc
 *.pem
 AIOA-签发密钥备份*.zip
+*更新密钥备份*.zip
 *.license
 /public-keys.json
+/update-public-keys.json
+update-private-key.pem
+*.oaf-update
 /.secrets/
 pptx_extractor/bin/

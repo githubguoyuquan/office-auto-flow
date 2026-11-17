@@ -1,6 +1,7 @@
 """Compile a native standalone workbench or separate owner-only issuer."""
 import argparse
 import base64
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -12,6 +13,8 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from offline_updates import BASE_API
 APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "ui_resources.py", "offline_updates.py", "update_manager.py", "update_keys.py")
 
 for _stream in (sys.stdout, sys.stderr):
@@ -38,10 +41,26 @@ def load_public_keys(path):
     return keys
 
 
+def write_verification_keys(source, license_keys, update_keys, base_sequence=None):
+    if not license_keys or not update_keys:
+        raise ValueError("许可证公钥和更新发布公钥都必须配置。")
+    if set(license_keys) & set(update_keys) or set(license_keys.values()) & set(update_keys.values()):
+        raise ValueError("更新发布密钥必须独立创建，不能复用软件许可证密钥。")
+    if base_sequence is None:
+        base_sequence = int(datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
+    if type(base_sequence) is not int or base_sequence < 1:
+        raise ValueError("基础版本序号必须是正整数。")
+    (source / "license_keys.py").write_text("PUBLIC_KEYS = " + repr(license_keys) + "\n", encoding="utf-8")
+    (source / "update_keys.py").write_text(
+        "UPDATE_PUBLIC_KEYS = " + repr(update_keys) + "\nBASE_RELEASE_SEQUENCE = " + str(base_sequence) + "\n", encoding="utf-8")
+    return base_sequence
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=("workbench", "issuer"), default="workbench")
     parser.add_argument("--public-keys", type=Path)
+    parser.add_argument("--update-public-keys", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--jobs", type=int, default=4)
     args = parser.parse_args()
@@ -53,6 +72,9 @@ def main():
     keys = load_public_keys(args.public_keys) if args.target == "workbench" and args.public_keys else {}
     if args.target == "workbench" and not keys:
         parser.error("必须指定 --public-keys public-keys.json。")
+    update_keys = load_public_keys(args.update_public_keys) if args.target == "workbench" and args.update_public_keys else {}
+    if args.target == "workbench" and not update_keys:
+        parser.error("必须指定 --update-public-keys update-public-keys.json。")
     if args.jobs < 1:
         parser.error("--jobs 必须大于 0。")
     with tempfile.TemporaryDirectory(prefix="aioa-compile-") as temporary:
@@ -63,7 +85,7 @@ def main():
         for filename in modules:
             shutil.copy2(ROOT / filename, source / filename)
         if args.target == "workbench":
-            (source / "license_keys.py").write_text("PUBLIC_KEYS = " + repr(keys) + "\n", encoding="utf-8")
+            base_sequence = write_verification_keys(source, keys, update_keys)
         entry = "oa_login_cli" if args.target == "workbench" else "license_issuer"
         name = "AIOA" if args.target == "workbench" else "AIOA-Issuer"
         executable = name + (".exe" if sys.platform == "win32" else "")
@@ -101,7 +123,7 @@ def main():
         ssl_policy = Path(ssl.__file__).with_name("codex-rejected-cas.pem")
         if ssl_policy.is_file():
             shutil.copy2(ssl_policy, dist / ssl_policy.name)
-        forbidden = set(modules) | {"license_keys.py", "private-key.pem"}
+        forbidden = set(modules) | {"license_keys.py", "private-key.pem", "update-private-key.pem", "update_publisher.py"}
         if args.target == "workbench":
             forbidden.add("license_issuer.py")
         for path in dist.rglob("*"):
@@ -114,6 +136,9 @@ def main():
                 "public_key_ids": sorted(keys),
                 "executable_sha256": hashlib.sha256((destination / executable).read_bytes()).hexdigest()}
     if args.target == "workbench":
+        manifest["update_public_key_ids"] = sorted(update_keys)
+        manifest["update_base_api"] = BASE_API
+        manifest["update_base_sequence"] = base_sequence
         manifest["web_resources"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                                      for p in sorted((destination / "web").iterdir()) if p.is_file()}
         manifest["pptx_component_sha256"] = hashlib.sha256(
@@ -152,7 +177,9 @@ def main():
 4. 多个 PPTX 汇总到一个 XLSX；文件缺少原生表格时可能无法提取，当前不提供图片 OCR。
 5. 配置登录地址，选择款号或批量 XLSX，选择 PDF 输出目录。
 6. 辅料模板可选；选择模板后需指定辅料目录，批量任务汇总为一个 XLSX。
-7. 更新前先点击“退出工作台”，等退出完成并关闭命令窗口后再安装。
+7. 收到 .oaf-update 更新包后，任务结束时进入“应用配置 → 软件更新 → 导入更新包”，成功后自动刷新。
+8. 如更新界面无法使用，打开 http://127.0.0.1:54418/updates/recovery，回退到上一版本。
+9. 收到完整安装包时，先点击“退出工作台”，等退出完成并关闭命令窗口后再覆盖安装。
 
 四、数据保存位置
 设置、授权、模板和登录会话保存在 %APPDATA%\\oa-login-cli；卸载保留上述数据及导出文件。

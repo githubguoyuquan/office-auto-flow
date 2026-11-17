@@ -166,8 +166,10 @@ class UpdateStore:
                 raise UpdateError("已安装的更新文件校验失败。")
         return root, manifest
 
-    def install(self, package, healthcheck):
+    def install(self, package, healthcheck, *, minimum_sequence=0):
         """Validate/stage a full resource snapshot, then atomically select it."""
+        if type(minimum_sequence) is not int or minimum_sequence < 0:
+            raise UpdateError("基础版本序号无效。")
         with self._lock():
             state = self.state()
             releases = self.root / "releases"
@@ -188,8 +190,9 @@ class UpdateStore:
                         raise UpdateError("更新清单过大。")
                     raw = archive.read(info)
                     manifest = verify_manifest(raw, self.keys)
-                    if manifest["sequence"] <= state["highest_sequence"]:
-                        raise UpdateError("更新包版本不高于已安装版本。")
+                    threshold = max(state["highest_sequence"], minimum_sequence)
+                    if manifest["sequence"] <= threshold:
+                        raise UpdateError(f"更新包版本不高于已安装版本（最低序号：{threshold}）。")
                     expected = {"update.json"} | {"payload/" + name for name in manifest["files"]}
                     if set(names) != expected:
                         raise UpdateError("更新包包含未签名文件或缺失文件。")

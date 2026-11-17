@@ -15,8 +15,24 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+from offline_updates import BASE_API
 DEFAULT_PAYLOAD = ROOT / "preview" / "Office-Auto-Flow-API-67b91cf"
 DEFAULT_OUTPUT = ROOT / "preview" / "Office-Auto-Flow-API-Setup-67b91cf-win-x64.exe"
+
+
+def validate_update_metadata(manifest):
+    identifiers = manifest.get("update_public_key_ids")
+    if (not isinstance(identifiers, list) or not identifiers
+            or any(not isinstance(name, str) or len(name) != 16
+                   or any(char not in "0123456789abcdef" for char in name) for name in identifiers)
+            or len(set(identifiers)) != len(identifiers)
+            or set(identifiers) & set(manifest.get("public_key_ids", []))):
+        raise ValueError("编译产物必须包含独立的更新发布公钥。")
+    if type(manifest.get("update_base_api")) is not int or manifest["update_base_api"] != BASE_API:
+        raise ValueError("编译产物的更新接口版本不兼容。")
+    if type(manifest.get("update_base_sequence")) is not int or manifest["update_base_sequence"] < 1:
+        raise ValueError("编译产物缺少基础版本序号。")
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -191,6 +207,7 @@ def main() -> int:
         manifest = json.loads((payload / "build-manifest.json").read_text(encoding="utf-8"))
         if manifest.get("target") != "workbench" or manifest.get("platform") != "win32" or not manifest.get("public_key_ids"):
             parser.error("编译产物的平台或公钥配置不正确")
+        validate_update_metadata(manifest)
         for name in ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "ui_resources.py", "offline_updates.py", "update_manager.py", "update_keys.py"):
             if manifest.get("sources", {}).get(name) != hashlib.sha256((ROOT / name).read_bytes()).hexdigest():
                 parser.error(f"编译产物与当前源代码不一致：{name}")
@@ -217,7 +234,7 @@ def main() -> int:
         if manifest.get("pptx_sources") != go_sources:
             parser.error("PPTX 提取组件与当前源代码不一致")
         for path in payload.rglob("*"):
-            if path.is_file() and path.name in {"oa_login_cli.py", "license_issuer.py", "private-key.pem", "offline_license.py", "license_manager.py", "license_keys.py", "trim_template.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "pptx_ui.py", "ui_resources.py", "offline_updates.py", "update_manager.py", "update_keys.py"}:
+            if path.is_file() and path.name in {"oa_login_cli.py", "license_issuer.py", "private-key.pem", "offline_license.py", "license_manager.py", "license_keys.py", "trim_template.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "pptx_ui.py", "ui_resources.py", "offline_updates.py", "update_manager.py", "update_keys.py", "update_publisher.py", "update-private-key.pem"}:
                 parser.error("客户安装包不得包含应用源码、签发工具或私钥")
     elif (payload / "oa_login_cli.py").read_bytes() != (ROOT / "oa_login_cli.py").read_bytes():
         parser.error("payload 的应用代码与当前分支不一致")

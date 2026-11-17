@@ -9,6 +9,10 @@ on:
         description: 'Paste public-keys.json from the issuer. Never provide a private key.'
         required: true
         type: string
+      update_public_keys_json:
+        description: 'Paste independent update-public-keys.json. Never provide a private key.'
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -37,11 +41,13 @@ jobs:
         shell: pwsh
         env:
           PUBLIC_KEYS_JSON: ${{ inputs.public_keys_json }}
+          UPDATE_PUBLIC_KEYS_JSON: ${{ inputs.update_public_keys_json }}
         run: |
           python -c "import os,pathlib,json; content=os.environ.get('PUBLIC_KEYS_JSON') or pathlib.Path('.github/license-public-keys.json').read_text(encoding='utf-8'); value=json.loads(content); pathlib.Path('public-keys.json').write_text(json.dumps(value),encoding='utf-8')"
+          python -c "import os,pathlib,json; content=os.environ.get('UPDATE_PUBLIC_KEYS_JSON') or pathlib.Path('.github/update-public-keys.json').read_text(encoding='utf-8'); value=json.loads(content); pathlib.Path('update-public-keys.json').write_text(json.dumps(value),encoding='utf-8')"
       - name: Compile, smoke-test and build installer
         shell: powershell
-        run: ./packaging/build_licensed_windows.ps1 -PublicKeys ./public-keys.json
+        run: ./packaging/build_licensed_windows.ps1 -PublicKeys ./public-keys.json -UpdatePublicKeys ./update-public-keys.json
       - name: Upload customer installer
         uses: actions/upload-artifact@v4
         with:
