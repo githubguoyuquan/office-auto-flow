@@ -203,6 +203,13 @@ def main() -> int:
             parser.error("编译产物缺少正确的客户配置")
         if manifest.get("executable_sha256") != hashlib.sha256((payload / "AIOA.exe").read_bytes()).hexdigest():
             parser.error("编译程序校验失败")
+        component = payload / "pptx_extractor/bin/pptx-extractor.exe"
+        if not component.is_file() or manifest.get("pptx_component_sha256") != hashlib.sha256(component.read_bytes()).hexdigest():
+            parser.error("PPTX 提取组件缺失或校验失败")
+        go_sources = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                      for p in sorted((ROOT / "pptx_extractor").glob("*.go"))}
+        if manifest.get("pptx_sources") != go_sources:
+            parser.error("PPTX 提取组件与当前源代码不一致")
         for path in payload.rglob("*"):
             if path.is_file() and path.name in {"oa_login_cli.py", "license_issuer.py", "private-key.pem", "offline_license.py", "license_manager.py", "license_keys.py", "trim_template.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "pptx_ui.py"}:
                 parser.error("客户安装包不得包含应用源码、签发工具或私钥")

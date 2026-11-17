@@ -34,6 +34,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Compiled program self-test failed." }
     & (Join-Path $payload "AIOA.exe") --browser-smoke
     if ($LASTEXITCODE -ne 0) { throw "Browser smoke test failed. Install Microsoft Edge before retrying." }
+    & $buildPython packaging/smoke_pptx.py (Join-Path $payload "pptx_extractor\bin\pptx-extractor.exe")
+    if ($LASTEXITCODE -ne 0) { throw "Packaged PPTX component smoke test failed." }
     $setup = Join-Path $projectRoot "preview\Office-Auto-Flow-API-Licensed-$buildStamp-win-x64.exe"
     & $buildPython packaging/build_windows_installer.py --payload $payload --output $setup --makensis $makensis --nsis-dir $nsisRoot --version "0.2.0-$buildStamp"
     if ($LASTEXITCODE -ne 0) { throw "Installer build failed." }

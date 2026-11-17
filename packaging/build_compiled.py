@@ -87,6 +87,14 @@ def main():
         dist = root / "build" / (entry + ".dist")
         if not (dist / executable).is_file():
             raise RuntimeError("编译未生成预期的程序。")
+        if args.target == "workbench":
+            go_root = ROOT / "pptx_extractor"
+            environment = dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0")
+            subprocess.run(["go", "test", "./..."], cwd=go_root, check=True)
+            component = dist / "pptx_extractor" / "bin" / "pptx-extractor.exe"
+            component.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["go", "build", "-trimpath", "-ldflags=-s -w", "-o", str(component), "."],
+                           cwd=go_root, env=environment, check=True)
         # Some bundled Python runtimes require an additional SSL policy resource.
         # Preserve that policy when relocating the interpreter's compiled modules.
         ssl_policy = Path(ssl.__file__).with_name("codex-rejected-cas.pem")
@@ -105,6 +113,10 @@ def main():
                 "public_key_ids": sorted(keys),
                 "executable_sha256": hashlib.sha256((destination / executable).read_bytes()).hexdigest()}
     if args.target == "workbench":
+        manifest["pptx_component_sha256"] = hashlib.sha256(
+            (destination / "pptx_extractor/bin/pptx-extractor.exe").read_bytes()).hexdigest()
+        manifest["pptx_sources"] = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                    for p in sorted((ROOT / "pptx_extractor").glob("*.go"))}
         manifest["customer_profile_sha256"] = (
             hashlib.sha256((ROOT / "customer-profile.json").read_bytes()).hexdigest()
             if (ROOT / "customer-profile.json").is_file() else None
@@ -131,10 +143,10 @@ def main():
 双击 AIOA.exe 启动，使用右上角“退出工作台”正常退出。
 
 三、首次配置与执行
-1. 在授权管理中导出设备申请文件，交给管理员。
-2. 管理员签发授权后，导入 .license 文件；导入时需要联网校时。
-3. 重启后及每隔 24 小时需要联网校时；失败时无法开始新任务，可点击联网校验重试。
-4. 授权过期不打断当前任务，但不能启动下一批任务。
+1. 当前整合预览版全部模块开放，无需导入许可证。
+2. 选择“PPTX 面辅料提取”，选择 PPTX 文件和一个 XLSX 模板。
+3. 按需配置模板列匹配、字段别名和保存目录，然后开始运行。
+4. 多个 PPTX 汇总到一个 XLSX；文件缺少原生表格时可能无法提取，当前不提供图片 OCR。
 5. 配置登录地址，选择款号或批量 XLSX，选择 PDF 输出目录。
 6. 辅料模板可选；选择模板后需指定辅料目录，批量任务汇总为一个 XLSX。
 7. 更新前先点击“退出工作台”，等退出完成并关闭命令窗口后再安装。

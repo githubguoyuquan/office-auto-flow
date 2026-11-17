@@ -21,6 +21,15 @@ jobs:
         with:
           python-version: '3.12'
           architecture: x64
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: false
+      - name: Configure UTF-8 build output
+        shell: pwsh
+        run: |
+          "PYTHONUTF8=1" >> $env:GITHUB_ENV
+          "PYTHONIOENCODING=utf-8" >> $env:GITHUB_ENV
       - name: Install NSIS
         shell: pwsh
         run: choco install nsis --yes --no-progress
@@ -32,7 +41,7 @@ jobs:
           python -c "import os,pathlib,json; content=os.environ.get('PUBLIC_KEYS_JSON') or pathlib.Path('.github/license-public-keys.json').read_text(encoding='utf-8'); value=json.loads(content); pathlib.Path('public-keys.json').write_text(json.dumps(value),encoding='utf-8')"
       - name: Compile, smoke-test and build installer
         shell: powershell
-        run: ./packaging/build_licensed_windows.ps1 -PublicKeys ./public-keys.json -BuildIssuer
+        run: ./packaging/build_licensed_windows.ps1 -PublicKeys ./public-keys.json
       - name: Upload customer installer
         uses: actions/upload-artifact@v4
         with:
@@ -40,10 +49,4 @@ jobs:
           path: |
             preview/Office-Auto-Flow-API-Licensed-*-win-x64.exe
             preview/Office-Auto-Flow-API-Licensed-*-win-x64.exe.sha256
-          if-no-files-found: error
-      - name: Upload owner-only issuer
-        uses: actions/upload-artifact@v4
-        with:
-          name: AIOA-Owner-Issuer
-          path: preview/AIOA-Issuer-*/
           if-no-files-found: error
