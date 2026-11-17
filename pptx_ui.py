@@ -31,7 +31,8 @@ PPTX_UI = r'''
     #pptxInputs:empty{display:none}
     #pptxInputs .pptx-file{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;background:var(--canvas);font-size:12px}
     #pptxInputs .pptx-file span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
-    #pptxInputs .pptx-file button{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;padding:2px 5px}
+    #pptxInputs .pptx-file button{border:1px solid var(--line);border-radius:7px;background:transparent;color:var(--ink);cursor:pointer;font-size:11px;line-height:1.4;padding:5px 9px;flex-shrink:0}
+    #pptxInputs .pptx-file button:hover:not(:disabled){background:var(--pale)}
     #pptxMappingDetails{border:1px solid var(--line);border-radius:14px;padding:15px 18px}
     #pptxMappingDetails summary{cursor:pointer;font-size:12px;font-weight:500;list-style:none;display:flex;gap:10px;align-items:center}
     #pptxMappingDetails summary:before{content:'›';font-size:18px;color:var(--muted);transition:transform .15s}
@@ -56,7 +57,7 @@ PPTX_UI = r'''
     <div class="pptx-head"><h4 id="pptxSourceTitle">工艺单文件</h4><span class="pptx-pill" id="pptxFileCount">支持批量提取</span></div>
     <div class="pptx-drop"><span class="pptx-file-icon" aria-hidden="true">PPTX</span><div class="pptx-drop-copy"><span id="pptxSourceHint">选择需要提取的工艺单</span><p class="pptx-caption">可一次选择多个文件，统一汇总为一份 Excel</p></div><button id="pptxChooseInputs" type="button" class="ghost">选择文件</button></div>
     <div id="pptxInputs" aria-label="已选择的 PPTX 文件"></div>
-    <div class="pptx-card-foot" id="pptxFileFoot" hidden><span class="pptx-caption">仅在本机读取，不上传文件</span><button id="pptxClearInputs" type="button" class="pptx-link">清空列表</button></div>
+    <div class="pptx-card-foot" id="pptxFileFoot" hidden><span class="pptx-caption">移除仅取消选择，不删除原文件</span><div style="display:flex;gap:12px;flex-shrink:0"><button id="pptxReplaceInputs" type="button" class="pptx-link">更换全部</button><button id="pptxClearInputs" type="button" class="pptx-link">清空列表</button></div></div>
     </section>
     <div class="pptx-grid">
       <section class="pptx-card" aria-labelledby="pptxTemplateTitle"><div class="pptx-head"><h4 id="pptxTemplateTitle">输出模板</h4><span class="pptx-pill">XLSX</span></div><p class="pptx-path-name" id="pptxTemplateName">尚未选择模板</p><div class="picker-row"><input id="pptxTemplate" class="field" aria-label="模板完整路径" readonly placeholder="选择一个 Excel 模板"><button id="pptxChooseTemplate" type="button" class="ghost">选择模板</button></div><p class="pptx-caption">沿用模板列顺序与样式，不新增列</p></section>
@@ -82,6 +83,8 @@ PPTX_UI = r'''
   async function pptxAction(action,message='处理中…'){if(pptxBusy||runningPhases.has(currentTask.phase))return;pptxBusy=true;pptxBusyMessage=message;$('pptxError').hidden=true;renderTask();try{await action()}catch(error){pptxError(error)}finally{pptxBusy=false;pptxBusyMessage='';renderTask()}}
   $('pptxChooseInputs').onclick=()=>pptxAction(async()=>{const data=await api('/api/pptx/files','POST',{kind:'pptx'});if(data.paths.length){const before=pptx.inputs.length,combined=[...new Set([...pptx.inputs,...data.paths])];if(combined.length>1000)throw Error('每批最多选择 1000 个文件，已保留原文件列表。');pptx.inputs=combined;toast(`新增 ${pptx.inputs.length-before} 个文件，共 ${pptx.inputs.length} 个`) }},'请在系统窗口选择 PPTX 文件…');
   $('pptxClearInputs').onclick=()=>{pptx.inputs=[];renderTask()};
+  $('pptxReplaceInputs').onclick=()=>pptxAction(async()=>{const data=await api('/api/pptx/files','POST',{kind:'pptx'});if(data.paths.length){if(data.paths.length>1000)throw Error('每批最多选择 1000 个文件，已保留原列表。');pptx.inputs=[...new Set(data.paths)]}},'请选择用于替换当前列表的 PPTX 文件…');
+  function replacePptx(index){pptxAction(async()=>{const data=await api('/api/pptx/files','POST',{kind:'pptx',multiple:false});if(!data.paths.length)return;if(data.paths.length!==1)throw Error('请只选择一个用于更换的 PPTX 文件。');if(pptx.inputs.some((path,i)=>i!==index&&path===data.paths[0]))throw Error('该文件已在列表中，原选择已保留。');pptx.inputs[index]=data.paths[0]},'请选择一个用于更换的 PPTX 文件…')}
   $('pptxChooseTemplate').onclick=()=>pptxAction(async()=>{const data=await api('/api/pptx/files','POST',{kind:'xlsx'});if(data.paths.length){const previous={template:pptx.template,mapping:[...pptx.mapping],analysis:pptxAnalysis};try{const analysis=await api('/api/pptx/template','POST',{template:data.paths[0],rules:pptx.rules});pptx.template=data.paths[0];pptxAnalysis=analysis;pptx.mapping=analysis.mapping;await pptxSave();drawMapping()}catch(error){pptx.template=previous.template;pptx.mapping=previous.mapping;pptxAnalysis=previous.analysis;drawMapping();throw Error('新模板未应用，已保留原配置。'+error.message)}}},'请选择模板，程序会自动分析字段…');
   $('pptxChooseOutput').onclick=()=>pptxAction(async()=>{const data=await api('/api/choose-directory','POST',{initial:pptx.output_dir});if(data.path){pptx.output_dir=data.path;await pptxSave()}},'请在系统窗口选择保存文件夹…');
   $('pptxDefaultOutput').onclick=()=>pptxAction(async()=>{pptx.output_dir='';await pptxSave()},'正在恢复默认保存位置…');
@@ -105,12 +108,13 @@ PPTX_UI = r'''
     document.body.classList.toggle('pptx-view',local);document.body.classList.toggle('pptx-idle',local&&currentTask.phase==='idle');pptxPanel.hidden=!local;
     for(const [id,value] of [['pptxTemplate',pptx.template],['pptxOutput',pptx.output_dir]]){$(id).value=value;$(id).title=value}
     $('pptxTemplateName').textContent=pptx.template?pptxBaseName(pptx.template):'尚未选择模板';
+    $('pptxChooseTemplate').textContent=pptx.template?'更换模板':'选择模板';
     $('pptxOutputName').textContent=pptx.output_dir?pptxBaseName(pptx.output_dir):'首个 PPTX 所在文件夹';
     $('pptxFileCount').textContent=pptx.inputs.length?`已选 ${pptx.inputs.length} 个文件`:'支持批量提取';
     $('pptxSourceHint').textContent=pptx.inputs.length?'工艺单已准备好':'选择需要提取的工艺单';
     $('pptxChooseInputs').textContent=pptx.inputs.length?'继续添加':'选择文件';$('pptxFileFoot').hidden=!pptx.inputs.length;
     const key=JSON.stringify(pptx.inputs);
-    if(key!==pptxFilesKey){pptxFilesKey=key;$('pptxInputs').replaceChildren();pptx.inputs.forEach((path,index)=>{const row=document.createElement('div');row.className='pptx-file';const name=document.createElement('span');name.textContent=pptxBaseName(path);name.title=path;const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.setAttribute('aria-label','移除 '+pptxBaseName(path));remove.onclick=()=>{pptx.inputs.splice(index,1);renderTask()};row.append(name,remove);$('pptxInputs').append(row)})}
+    if(key!==pptxFilesKey){pptxFilesKey=key;$('pptxInputs').replaceChildren();pptx.inputs.forEach((path,index)=>{const row=document.createElement('div');row.className='pptx-file';const name=document.createElement('span');name.textContent=pptxBaseName(path);name.title=path;const replace=document.createElement('button');replace.type='button';replace.textContent='更换';replace.dataset.action='replace';replace.setAttribute('aria-label','更换 '+pptxBaseName(path));replace.onclick=()=>replacePptx(index);const remove=document.createElement('button');remove.type='button';remove.textContent='移除';remove.dataset.action='remove';remove.setAttribute('aria-label','移除 '+pptxBaseName(path));remove.onclick=()=>{pptx.inputs.splice(index,1);renderTask()};row.append(name,replace,remove);$('pptxInputs').append(row)})}
     $('pptxMappingSummary').textContent=pptxAnalysis?`${pptxAnalysis.headers.length} 列 · ${pptx.mapping.filter(v=>v>=0).length} 列已匹配 · ${pptx.rules.length} 条别名`:'选择模板后自动匹配';
     for(const el of pptxPanel.querySelectorAll('button,select'))el.disabled=active||pptxBusy||!pptxReady;
     for(const id of ['pptxAnalyze','pptxRules','pptxSave'])$(id).disabled=active||pptxBusy||!pptxReady||!pptx.template;

@@ -1762,7 +1762,8 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
                     raise ValueError("文件选择窗口已打开。")
                 try:
-                    paths = choose_files(body.get("kind"))
+                    paths = (choose_files(body.get("kind"), multiple=body["multiple"])
+                             if "multiple" in body else choose_files(body.get("kind")))
                 finally:
                     DIRECTORY_PICKER_LOCK.release()
                 self._send(200, {"paths": paths})

@@ -9,10 +9,45 @@ import time
 import unittest
 from unittest.mock import patch
 
-from pptx_service import ExtractionCancelled, invoke, prepare_request, load_settings, save_settings
+from pptx_service import ExtractionCancelled, invoke, prepare_request, load_settings, save_settings, choose_files, validate_file
 
 
 class PptxServiceTests(unittest.TestCase):
+    def test_windows_picker_all_files_filter_and_single_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'中文.PPTX';path.touch()
+            completed=subprocess.CompletedProcess([],0,json.dumps([str(path)]),'')
+            with patch('pptx_service.sys.platform','win32'),patch('pptx_service.subprocess.run',return_value=completed) as run:
+                self.assertEqual(choose_files('pptx',multiple=False),[str(path.resolve())])
+                env=run.call_args.kwargs['env']
+                self.assertIn('所有文件 (*.*)|*.*',env['AIOA_FILE_FILTER'])
+                self.assertIn('*.pptx',env['AIOA_FILE_FILTER'])
+                self.assertEqual(env['AIOA_PICKER_MULTIPLE'],'false')
+                choose_files('pptx')
+                self.assertEqual(run.call_args.kwargs['env']['AIOA_PICKER_MULTIPLE'],'true')
+                completed.stdout='[]'
+                self.assertEqual(choose_files('pptx',multiple=False),[])
+
+    def test_mac_picker_does_not_hide_pptx_based_on_system_type(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'微信文件.pptx';path.touch()
+            completed=subprocess.CompletedProcess([],0,str(path)+'\n','')
+            with patch('pptx_service.sys.platform','darwin'),patch('pptx_service.subprocess.run',return_value=completed) as run:
+                self.assertEqual(choose_files('pptx',multiple=False),[str(path.resolve())])
+                command=run.call_args.args[0]
+                self.assertNotIn('choose file of type',command[2])
+                self.assertEqual(command[-1],'single')
+
+    def test_unsupported_format_explains_actual_suffix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for suffix in ('.ppt','.pptm','.xls'):
+                path=Path(tmp)/('wrong'+suffix);path.touch()
+                with self.assertRaises(ValueError) as error:
+                    validate_file(str(path),'xlsx' if suffix=='.xls' else 'pptx')
+                self.assertIn(suffix,str(error.exception))
+                self.assertIn('另存为',str(error.exception))
+                self.assertIn('不能只修改',str(error.exception))
+
     def test_corrupt_configuration_and_invalid_options_are_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'pptx-settings.json'

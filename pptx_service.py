@@ -87,23 +87,38 @@ def save_settings(directory, body):
     return dict(value, analysis=analysis)
 
 
-def choose_files(kind):
+def choose_files(kind, *, multiple=None):
     if kind not in {"pptx", "xlsx"}:
         raise ValueError("文件类型无效。")
+    if multiple is not None and type(multiple) is not bool:
+        raise ValueError("文件选择方式无效。")
+    allow_multiple = kind == "pptx" and multiple is not False
     if sys.platform == "win32":
         script = '''[Console]::OutputEncoding = [Text.UTF8Encoding]::new()
 Add-Type -AssemblyName System.Windows.Forms
 $d = New-Object System.Windows.Forms.OpenFileDialog
 $d.Filter = $env:AIOA_FILE_FILTER
-$d.Multiselect = ($env:AIOA_FILE_KIND -eq 'pptx')
+$d.Multiselect = ($env:AIOA_PICKER_MULTIPLE -eq 'true')
+$d.Title = $env:AIOA_PICKER_TITLE
+$d.CheckFileExists = $true
+$d.CheckPathExists = $true
+$d.RestoreDirectory = $true
 try { if ($d.ShowDialog() -eq 'OK') { ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { '[]' } } finally { $d.Dispose() }'''
         command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
-        env = dict(os.environ, AIOA_FILE_KIND=kind, AIOA_FILE_FILTER=f"{kind.upper()}|*.{kind}")
+        label = "PowerPoint 文件" if kind == "pptx" else "Excel 工作簿"
+        env = dict(os.environ, AIOA_FILE_KIND=kind,
+                   AIOA_PICKER_MULTIPLE="true" if allow_multiple else "false",
+                   AIOA_PICKER_TITLE=f"Select {kind.upper()} files",
+                   AIOA_FILE_FILTER=f"{label} (*.{kind})|*.{kind}|所有文件 (*.*)|*.*")
     elif sys.platform == "darwin":
         script = '''on run argv
 try
 activate
-set selectedFiles to choose file of type {item 1 of argv} with multiple selections allowed
+if item 2 of argv is "multiple" then
+set selectedFiles to choose file with prompt ("选择 " & item 1 of argv & " 文件") with multiple selections allowed
+else
+set selectedFiles to {choose file with prompt ("选择一个 " & item 1 of argv & " 文件")}
+end if
 set resultText to ""
 repeat with selectedFile in selectedFiles
 set resultText to resultText & POSIX path of selectedFile & linefeed
@@ -113,15 +128,19 @@ on error number -128
 return ""
 end try
 end run'''
-        command, env = ["osascript", "-e", script, kind], None
+        command, env = ["osascript", "-e", script, kind, "multiple" if allow_multiple else "single"], None
     else:
         raise ValueError("本地文件选择目前支持 Windows 和 macOS。")
     result = subprocess.run(command, capture_output=True, encoding="utf-8", env=env)
     if result.returncode:
         raise ValueError("无法打开文件选择窗口。")
     paths = json.loads(result.stdout or "[]") if sys.platform == "win32" else result.stdout.strip().splitlines()
-    if kind == "xlsx" and len(paths) > 1:
-        raise ValueError("请只选择一个 XLSX 模板。")
+    if isinstance(paths, str):
+        paths = [paths]
+    if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+        raise ValueError("系统文件选择窗口返回了无效路径。")
+    if not allow_multiple and len(paths) > 1:
+        raise ValueError(f"请只选择一个 {kind.upper()} 文件。")
     return [validate_file(path, kind) for path in paths]
 
 
@@ -130,7 +149,11 @@ def validate_file(value, extension, *, must_exist=True):
         raise ValueError("文件路径无效。")
     try:
         path = Path(value).expanduser().resolve()
-        if path.suffix.lower() != f".{extension}" or (must_exist and not path.is_file()):
+        if path.suffix.lower() != f".{extension}":
+            application = "PowerPoint" if extension == "pptx" else "Excel"
+            raise ValueError(f"文件“{path.name}”的实际格式为 {path.suffix or '无扩展名'}，当前仅支持 .{extension}。"
+                             f"请用 {application} 另存为 .{extension} 格式，不能只修改文件后缀。")
+        if must_exist and not path.is_file():
             raise ValueError(f"请选择可读取的 {extension.upper()} 文件。")
         if must_exist:
             with path.open("rb"):
