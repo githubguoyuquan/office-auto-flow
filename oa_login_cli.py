@@ -2,6 +2,7 @@
 """Local OA automation workbench. Run with Python, then use its browser UI."""
 
 import base64
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import io
@@ -13,6 +14,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 import webbrowser
 import zipfile
@@ -29,6 +31,8 @@ from pptx_service import (ExtractionCancelled, choose_files, executable as pptx_
                           validate_file as validate_pptx_file)
 from pptx_service import load_settings as load_pptx_settings, save_settings as save_pptx_settings
 from ui_resources import render_page
+from update_manager import UpdateManager
+import pptx_service
 from customer_profile import PROFILE, business_url, compatibility_host
 from material_suppliers import (MaterialSupplierLookup, MAX_MAPPING_BYTES, load_supplier_mapping,
                                 save_supplier_mapping, supplier_mapping_status, supplier_names)
@@ -615,6 +619,7 @@ class AutomationController:
         self.worker = None
         self.local_worker = None
         self.task_active = False
+        self.updating = False
         self.state = {
             "phase": "idle",
             "step": "open",
@@ -629,7 +634,19 @@ class AutomationController:
 
     def snapshot(self) -> dict:
         with self.lock:
-            return dict(self.state)
+            return dict(self.state, maintenance=self.updating, task_active=self.task_active)
+
+    @contextmanager
+    def maintenance(self):
+        with self.lock:
+            if self.task_active or self.updating or self.shutdown_event.is_set():
+                raise ValueError("请等待任务或其他更新操作结束后再更新软件。")
+            self.updating = True
+        try:
+            yield
+        finally:
+            with self.lock:
+                self.updating = False
 
     def update(self, phase: str, message: str, **values: Any) -> None:
         with self.lock:
@@ -654,7 +671,7 @@ class AutomationController:
         with self.lock:
             if self.shutdown_event.is_set():
                 raise ValueError("工作台正在退出，无法启动新任务。")
-            if self.task_active:
+            if self.task_active or self.updating:
                 raise ValueError("已有任务正在运行，请先等待或停止。")
             with CONFIG_LOCK:
                 name_mapping = (load_supplier_mapping(data_dir())["entries"]
@@ -684,10 +701,10 @@ class AutomationController:
 
     def _start_pptx(self, operation: dict) -> None:
         request = prepare_pptx_request(operation["request"])
-        binary = pptx_executable()
         with self.lock:
-            if self.shutdown_event.is_set() or self.task_active:
+            if self.shutdown_event.is_set() or self.task_active or self.updating:
                 raise ValueError("已有任务正在运行或工作台正在退出。")
+            binary = pptx_executable()
             self.cancel_event.clear()
             self.task_active = True
             self.state = {"phase": "running", "step": "extract", "login_encountered": False,
@@ -1415,6 +1432,8 @@ class AutomationController:
 CONTROLLER = AutomationController()
 ACCESS_TOKEN = secrets.token_urlsafe(32)
 LICENSES = LicenseManager(data_dir, unrestricted=True)
+UPDATES = UpdateManager(lambda: data_dir())
+pptx_service.COMPONENT_RESOLVER = lambda path: UPDATES.component(path)
 
 
 class LocalHandler(BaseHTTPRequestHandler):
@@ -1471,11 +1490,15 @@ class LocalHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if not self._trusted_host():
             self._send(403, {"error": "访问被拒绝。"})
-        elif self.path == "/":
+        elif self.path in {"/", "/updates/recovery"}:
             try:
-                self._send(200, render_page(ACCESS_TOKEN), "text/html")
+                page = (render_page(ACCESS_TOKEN) if self.path == "/updates/recovery"
+                        else UPDATES.page(ACCESS_TOKEN))
+                self._send(200, page, "text/html")
             except ValueError as error:
                 self._send(503, {"error": str(error)})
+        elif self.path == "/api/updates/status" and self._authorized():
+            self._send(200, UPDATES.status())
         elif self.path == "/api/state" and self._authorized():
             with CONFIG_LOCK:
                 settings = load_settings()
@@ -1496,8 +1519,15 @@ class LocalHandler(BaseHTTPRequestHandler):
             self._send(403, {"error": "访问被拒绝。"})
             return
         try:
+            if self.path == "/api/updates/install":
+                self._install_update()
+                return
             body = self._body()
-            if self.path == "/api/pptx/settings":
+            if self.path == "/api/updates/rollback":
+                with CONTROLLER.maintenance():
+                    status = UPDATES.rollback()
+                self._send(200, status)
+            elif self.path == "/api/pptx/settings":
                 if CONTROLLER.task_active:
                     raise ValueError("请等待任务完成后再更新提取配置。")
                 with CONFIG_LOCK:
@@ -1636,6 +1666,33 @@ class LocalHandler(BaseHTTPRequestHandler):
             self._send(400, {"error": str(error)})
         except Exception as error:
             self._send(500, {"error": f"服务器错误：{error}"})
+
+    def _install_update(self):
+        from offline_updates import MAX_BYTES
+        length = int(self.headers.get("Content-Length", "0"))
+        if length < 1 or length > MAX_BYTES or self.headers.get("Transfer-Encoding"):
+            raise ValueError("请选择 128 MB 以内的完整更新包。")
+        temporary = None
+        previous_timeout = self.connection.gettimeout()
+        try:
+            with CONTROLLER.maintenance():
+                self.connection.settimeout(30)
+                with tempfile.NamedTemporaryFile(prefix=".update-upload-", suffix=".zip",
+                                                 dir=data_dir(), delete=False) as stream:
+                    temporary = Path(stream.name)
+                    remaining = length
+                    while remaining:
+                        chunk = self.rfile.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError("更新包上传不完整，请重新选择。")
+                        stream.write(chunk)
+                        remaining -= len(chunk)
+                status = UPDATES.install(temporary)
+            self._send(200, status)
+        finally:
+            self.connection.settimeout(previous_timeout)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def do_DELETE(self) -> None:
         if not self._authorized():

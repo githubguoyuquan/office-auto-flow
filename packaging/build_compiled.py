@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "ui_resources.py")
+APP_MODULES = ("oa_login_cli.py", "trim_template.py", "offline_license.py", "license_manager.py", "customer_profile.py", "material_suppliers.py", "pptx_service.py", "ui_resources.py", "offline_updates.py", "update_manager.py", "update_keys.py")
 
 for _stream in (sys.stdout, sys.stderr):
     try:

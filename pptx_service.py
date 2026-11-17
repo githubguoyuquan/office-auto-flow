@@ -181,12 +181,15 @@ def prepare_request(body):
     return json.loads(json.dumps(result, ensure_ascii=False))
 
 
+COMPONENT_RESOLVER = lambda path: path
+
+
 def executable():
     name = "pptx-extractor.exe" if sys.platform == "win32" else "pptx-extractor"
     binary = Path(__file__).resolve().parent / "pptx_extractor" / "bin" / name
     if not binary.is_file():
         raise ValueError("PPTX 提取组件尚未构建，请先构建本机提取内核。")
-    return binary
+    return COMPONENT_RESOLVER(binary)
 
 
 def invoke(request, cancel, on_event, *, binary=None, timeout=3600):

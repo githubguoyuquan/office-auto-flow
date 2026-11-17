@@ -115,4 +115,54 @@
   const refreshTimer=setInterval(refresh,1300);
   exitButton.addEventListener('click',async()=>{if(runningPhases.has(currentTask.phase)&&!confirm('当前任务正在运行，退出会停止任务。确定退出工作台吗？'))return;exiting=true;exitButton.disabled=true;exitButton.textContent='正在退出…';try{await api('/api/shutdown','POST',{});clearInterval(refreshTimer);$('statusMessage').textContent='正在停止任务并关闭自动化浏览器，请稍候…';$('runButton').disabled=true;$('stopButton').disabled=true;const timer=setInterval(async()=>{try{await api('/api/state')}catch(_){clearInterval(timer);$('statusMessage').textContent='工作台服务已停止，可以关闭此页面。';exitButton.textContent='工作台已退出'}},1000)}catch(error){exiting=false;exitButton.disabled=false;exitButton.textContent='退出工作台';toast(error.message)}});
   __PPTX_UI__
+  let updateStatus={enabled:false,version:'正在读取…',can_rollback:false},updateBusy=false;
+  const updateSection=document.createElement('section');
+  updateSection.className='software-updates';
+  updateSection.setAttribute('aria-labelledby','softwareUpdatesTitle');
+  updateSection.innerHTML=`<h4 id="softwareUpdatesTitle">软件更新</h4>
+    <p class="panel-sub" id="softwareUpdateVersion"></p>
+    <p class="panel-sub">选择发布者提供的离线更新包。完成后自动刷新，登录状态及配置会保留；尚未执行的文件选择需重新填写。</p>
+    <p id="softwareUpdateMessage" class="panel-sub" role="status" aria-live="polite"></p>
+    <input id="softwareUpdateFile" type="file" accept=".oaf-update,.zip,application/zip" hidden>
+    <div class="modal-actions"><button id="rollbackSoftware" type="button" class="ghost">回退上一版本</button>
+    <button id="importSoftwareUpdate" type="button" class="primary">导入更新包</button></div>
+    <p id="softwareUpdateError" class="panel-sub" role="alert" hidden></p>
+    <p class="panel-sub"><a href="/updates/recovery">打开基础恢复界面</a></p>`;
+  settingsModal.querySelector('.modal').append(updateSection);
+  function renderUpdates(){
+    const busy=updateBusy||currentTask.maintenance,active=currentTask.task_active||runningPhases.has(currentTask.phase);
+    $('softwareUpdateVersion').textContent='当前版本：'+updateStatus.version;
+    $('importSoftwareUpdate').disabled=busy||active||exiting||!updateStatus.enabled;
+    $('rollbackSoftware').disabled=busy||active||exiting||!updateStatus.can_rollback;
+    $('closeSettings').disabled=updateBusy;
+    $('importSoftwareUpdate').textContent=updateBusy?'正在处理…':'导入更新包';
+    $('softwareUpdateMessage').textContent=busy?'更新正在处理中，请保持工作台打开。':active?'任务运行期间不能更新，请等待任务结束。':updateStatus.error||(!updateStatus.enabled?'当前版本尚未启用离线更新，请安装支持更新的基础版本。':'更新包会经过签名与完整性校验。');
+  }
+  async function loadUpdateStatus(){
+    try{updateStatus=await api('/api/updates/status');renderUpdates()}
+    catch(error){$('softwareUpdateError').textContent=error.message;$('softwareUpdateError').hidden=false}
+  }
+  settingsButton.addEventListener('click',loadUpdateStatus);
+  $('importSoftwareUpdate').onclick=()=>$('softwareUpdateFile').click();
+  async function changeSoftware(action){
+    if(updateBusy||currentTask.maintenance||currentTask.task_active||runningPhases.has(currentTask.phase))return;
+    updateBusy=true;$('softwareUpdateError').hidden=true;renderTask();
+    try{updateStatus=await action();$('softwareUpdateMessage').textContent='更新完成，正在刷新工作台…';location.reload()}
+    catch(error){$('softwareUpdateError').textContent=error.message;$('softwareUpdateError').hidden=false;updateBusy=false;renderTask()}
+    finally{$('softwareUpdateFile').value=''}
+  }
+  $('softwareUpdateFile').onchange=()=>{
+    const file=$('softwareUpdateFile').files[0];if(!file)return;
+    if(!file.size||file.size>128*1024*1024){$('softwareUpdateError').textContent='请选择 128 MB 以内的更新包。';$('softwareUpdateError').hidden=false;$('softwareUpdateFile').value='';return}
+    changeSoftware(async()=>{
+      const response=await fetch('/api/updates/install',{method:'POST',headers:{'X-AIOA-Token':TOKEN,'Content-Type':'application/octet-stream'},body:file,cache:'no-store'});
+      let result;try{result=await response.json()}catch{throw Error('无法读取更新结果，请重新打开应用配置查看版本。')}
+      if(!response.ok)throw Error(result.error||'更新失败');return result;
+    });
+  };
+  $('rollbackSoftware').onclick=()=>{if(confirm('回退上一版本并刷新工作台？'))changeSoftware(()=>api('/api/updates/rollback','POST',{}))};
+  const beforeUpdateCanRun=canRun;
+  canRun=item=>!updateBusy&&!currentTask.maintenance&&!currentTask.task_active&&beforeUpdateCanRun(item);
+  const beforeUpdateRenderTask=renderTask;
+  renderTask=()=>{beforeUpdateRenderTask();renderUpdates();if(updateBusy||currentTask.maintenance){$('runButton').disabled=true;exitButton.disabled=true}};
   refresh();
