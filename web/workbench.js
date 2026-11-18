@@ -13,6 +13,26 @@
   document.addEventListener('click',event=>{if(!sidebar.contains(event.target)&&!menuButton.contains(event.target))sidebar.classList.remove('sidebar-open')});
   const composerCopy=document.createElement('div');composerCopy.className='composer-copy';composerCopy.id='composerCopy';
   document.querySelector('.run-actions').prepend(composerCopy);
+  const uiBuild=document.createElement('span');uiBuild.textContent='界面 0.3.10';uiBuild.style.cssText='font-size:11px;color:var(--muted);margin-left:12px';document.querySelector('.crumb').append(uiBuild);
+  let startUiReady=false;
+  const startNotice=document.createElement('div');startNotice.className='modal-backdrop';
+  startNotice.innerHTML='<div class="modal" role="dialog" aria-modal="true" aria-labelledby="startNoticeTitle" aria-describedby="startNoticeMessage"><div class="modal-top"><h3 id="startNoticeTitle">暂时无法启动任务</h3><button type="button" class="icon-btn" aria-label="关闭提示">×</button></div><p id="startNoticeMessage" style="white-space:pre-line"></p><div class="modal-actions"><button type="button" class="primary">我知道了</button></div></div>';
+  document.body.append(startNotice);
+  function closeStartNotice(){startNotice.classList.remove('open');document.getElementById('runButton')?.focus()}
+  function showStartNotice(message){document.getElementById('startNoticeMessage').textContent=message;startNotice.classList.add('open');startNotice.querySelector('.primary').focus()}
+  for(const button of startNotice.querySelectorAll('button'))button.onclick=closeStartNotice;
+  startNotice.onclick=event=>{if(event.target===startNotice)closeStartNotice()};
+  startNotice.onkeydown=event=>{
+    if(event.key==='Escape'){event.stopPropagation();closeStartNotice()}
+    if(event.key==='Tab'){const buttons=[...startNotice.querySelectorAll('button')],first=buttons[0],last=buttons[buttons.length-1];if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}
+  };
+  document.addEventListener('click',event=>{
+    if(!event.target.closest('#runButton'))return;
+    let problem='';
+    try{problem=startUiReady?startProblem():'界面尚未初始化完成，请刷新工作台；若持续出现，请重新导入最新更新包。'}
+    catch(error){problem='界面配置读取失败：'+error.message+'。请刷新工作台重试。'}
+    if(problem){event.preventDefault();event.stopImmediatePropagation();showStartNotice(problem)}
+  },true);
   const TOKEN = '__AIOA_TOKEN__';
   const themeButton=document.createElement('button');themeButton.type='button';themeButton.className='theme-toggle';
   function updateThemeButton(){const dark=document.documentElement.dataset.theme==='dark';themeButton.textContent=dark?'☀ 浅色':'☾ 深色';themeButton.setAttribute('aria-label',dark?'切换到浅色模式':'切换到深色模式')}
@@ -43,7 +63,7 @@
   let choosingDirectory=false;
   $('uploadTemplate').addEventListener('click',()=>$('templateFile').click());
   for(const [buttonId,fieldId] of [['chooseOriginalDir','originalDir'],['chooseConvertedDir','convertedDir']]){
-    $(buttonId).addEventListener('click',async()=>{if(choosingDirectory)return;choosingDirectory=true;$(buttonId).textContent='选择中…';renderTask();try{const data=await api('/api/choose-directory','POST',{initial:$(fieldId).value});if(data.path)$(fieldId).value=data.path}catch(error){toast(error.message)}finally{choosingDirectory=false;$(buttonId).textContent='选择文件夹';renderTask()}});
+    $(buttonId).addEventListener('click',async()=>{if(choosingDirectory)return;choosingDirectory=true;$(buttonId).textContent='选择中…';try{renderTask();const data=await api('/api/choose-directory','POST',{initial:$(fieldId).value});if(data.path)$(fieldId).value=data.path}catch(error){toast(error.message)}finally{choosingDirectory=false;$(buttonId).textContent='选择文件夹';renderTask()}});
   }
   function isPrintOperation(item){if(!item)return false;if(item.kind==='process_sheet')return true;try{const u=new URL(item.url);return u.pathname.toLowerCase().endsWith('/plm/stylemanage/newstylemanage.html')}catch{return false}}
   const settingsButton=document.createElement('button');settingsButton.className='theme-toggle';settingsButton.id='applicationSettings';settingsButton.textContent='应用配置';document.querySelector('.top-right').prepend(settingsButton);
@@ -69,7 +89,18 @@
   let refreshRequest=null,taskStateEpoch=0;
   const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
   function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('show'),3600)}
-  async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal:path==='/api/state'?AbortSignal.timeout(15000):undefined});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
+  async function api(path,method='GET',body){
+    const duration=['/api/pptx/files','/api/choose-directory','/api/template-builder/source'].includes(path)?310000:['/api/state','/api/pptx/settings','/api/pptx/template','/api/settings','/api/local-xlsx','/api/template','/api/supplier-mapping'].includes(path)?30000:0;
+    const controller=new AbortController();
+    const timer=duration?setTimeout(()=>controller.abort(),duration):null;
+    try{
+      const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal:controller.signal});
+      let data;try{data=await response.json()}catch{throw new Error('无法读取服务器响应，请刷新工作台重试。')}
+      if(!response.ok)throw new Error(data.error||'请求失败。');return data;
+    }catch(error){if(controller.signal.aborted)throw new Error('请求超时，操作已结束，请重新选择或重试。');throw error}
+    finally{if(timer)clearTimeout(timer)}
+  }
+
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
   function canRun(item){if(!moduleAllowed(item)||licenseChecking||exiting||!item||taskRunning()||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
@@ -104,7 +135,7 @@
     const phase=currentTask.phase||'idle', active=taskRunning(), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
     if(phase==='idle'&&chosen&&licenseState.valid&&!moduleAllowed(chosen)){$('statusTitle').textContent='业务未授权';$('statusMessage').textContent='当前许可证未包含此业务模块，请联系管理员调整授权。'}
-    $('runButton').disabled=!canRun(chosen)||!/^https?:\/\//.test(chosen?.url||'');$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
+    $('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
@@ -114,11 +145,11 @@
   $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())$('styleCodesFile').value=''});
   $('styleCodesFile').addEventListener('change',()=>{if($('styleCodesFile').files.length)$('styleCode').value=''});
   for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,()=>renderTask())}
-  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
+  $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{await ensureOASettings();if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   const refreshTimer=setInterval(refresh,1300);
-  exitButton.addEventListener('click',async()=>{if(taskRunning()&&!confirm('当前任务正在运行，退出会停止任务。确定退出工作台吗？'))return;exiting=true;exitButton.disabled=true;exitButton.textContent='正在退出…';try{await api('/api/shutdown','POST',{});clearInterval(refreshTimer);$('statusMessage').textContent='正在停止任务并关闭自动化浏览器，请稍候…';$('runButton').disabled=true;$('stopButton').disabled=true;const timer=setInterval(async()=>{try{await api('/api/state')}catch(_){clearInterval(timer);$('statusMessage').textContent='工作台服务已停止，可以关闭此页面。';exitButton.textContent='工作台已退出'}},1000)}catch(error){exiting=false;exitButton.disabled=false;exitButton.textContent='退出工作台';toast(error.message)}});
+  exitButton.addEventListener('click',async()=>{if(taskRunning()&&!confirm('当前任务正在运行，退出会停止任务。确定退出工作台吗？'))return;exiting=true;exitButton.disabled=true;exitButton.textContent='正在退出…';try{await api('/api/shutdown','POST',{});clearInterval(refreshTimer);$('statusMessage').textContent='正在停止任务并关闭自动化浏览器，请稍候…';$('stopButton').disabled=true;const timer=setInterval(async()=>{try{await api('/api/state')}catch(_){clearInterval(timer);$('statusMessage').textContent='工作台服务已停止，可以关闭此页面。';exitButton.textContent='工作台已退出'}},1000)}catch(error){exiting=false;exitButton.disabled=false;exitButton.textContent='退出工作台';toast(error.message)}});
   let networkResolve=null;
   const networkModal=document.createElement('div');networkModal.className='modal-backdrop';
   networkModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="networkTitle"><div class="modal-top"><h3 id="networkTitle">网络文件路径</h3><button id="networkCancel" type="button" class="ghost">取消</button></div><p>支持 Windows 共享目录、映射盘及本机绝对路径。可粘贴资源管理器“复制文件地址”的内容。</p><label class="field-label" for="networkPath">文件完整路径</label><textarea id="networkPath" class="field" rows="5" style="height:120px;resize:vertical" spellcheck="false"></textarea><p id="networkHint"></p><div class="modal-actions"><button id="networkConfirm" type="button" class="primary">读取文件</button></div></section>`;
@@ -194,7 +225,7 @@
   const beforeUpdateCanRun=canRun;
   canRun=item=>!updateBusy&&!currentTask.maintenance&&!currentTask.task_active&&beforeUpdateCanRun(item);
   const beforeUpdateRenderTask=renderTask;
-  renderTask=()=>{beforeUpdateRenderTask();renderUpdates();if(updateBusy||currentTask.maintenance){$('runButton').disabled=true;exitButton.disabled=true}};
+  renderTask=()=>{beforeUpdateRenderTask();renderUpdates();if(updateBusy||currentTask.maintenance){exitButton.disabled=true}};
   let resettingTask=false;
   const resetTaskButton=document.createElement('button');resetTaskButton.type='button';resetTaskButton.className='ghost';resetTaskButton.id='resetTask';resetTaskButton.textContent='重置任务';$('stopButton').after(resetTaskButton);
   resetTaskButton.onclick=async()=>{
@@ -211,8 +242,7 @@
   const beforeResetRenderTask=renderTask;renderTask=()=>{
     beforeResetRenderTask();resetTaskButton.disabled=resettingTask||taskRunning()||pptxBusy||choosingDirectory||updateBusy||!!currentTask.maintenance||exiting;
     resetTaskButton.textContent=resettingTask?'正在重置…':'重置任务';
-    if(resettingTask)$('runButton').disabled=true;
-  };
+      };
   __TEMPLATE_BUILDER_UI__
   let printSourceMode=$('styleCodesFile').files.length?'batch':'single',workbenchSettings={};
   const preparePanel=document.createElement('section');preparePanel.id='taskPreparation';preparePanel.setAttribute('aria-label','任务准备情况');
@@ -254,7 +284,6 @@
       const items=[{label:'工艺单文件',done:pptx.inputs.length>0,target:'pptxChooseInputs'},
         {label:'输出模板',done:!!pptx.template&&!!pptxAnalysis,target:'pptxChooseTemplate'},
         {label:'保存位置',done:true,optional:true,target:'pptxChooseOutput',detail:pptx.output_dir?'已指定':'默认使用首个文件目录'}];
-      if(pptxNeedsSuppliers())items.push({label:'OA 连接配置',done:!!workbenchSettings.login_url,target:'applicationSettings',detail:'供应商补全需要'});
       return items;
     }
     if(isPrintOperation(selected())){const items=[
@@ -262,7 +291,7 @@
       {label:'辅料模板',done:true,optional:true,target:'templateHistory',detail:$('templateHistory').value?'已选择':'不导出辅料 XLSX'},
       {label:'PDF 保存位置',done:!!$('originalDir').value.trim(),target:'chooseOriginalDir'},
       {label:'辅料 XLSX 位置',done:!$('templateHistory').value||!!$('convertedDir').value.trim(),optional:!$('templateHistory').value,target:'chooseConvertedDir',detail:!$('templateHistory').value?'无需设置':''}];
-      if(!workbenchSettings.login_url)items.unshift({label:'OA 连接配置',done:false,target:'applicationSettings'});return items;
+      return items;
     }
     return [];
   }
@@ -292,8 +321,41 @@
       $('statusTitle').textContent=missing.length?'准备尚未完成':'准备就绪';
       $('statusMessage').textContent=$('prepHint').textContent;
     }
-    if(missing.length)$('runButton').disabled=true;
+    // Missing configuration is explained on click, never by a silent disabled button.
+
   }
   const beforePreparationCanRun=canRun;canRun=item=>beforePreparationCanRun(item)&&!preparationItems().some(field=>!field.optional&&!field.done);
-  const beforePreparationRenderTask=renderTask;renderTask=()=>{beforePreparationRenderTask();renderPreparation()};
+  async function ensureOASettings(){
+    if(workbenchSettings.login_url)return;
+    const login_url='http://noah.vgrass.com:8088/activiti/html/login.html';
+    await api('/api/settings','POST',{login_url});
+    workbenchSettings.login_url=login_url;
+  }
+  function startProblem(){
+    if(taskRunning())return '任务正在提交或运行，请等待完成。';
+    if(exiting||updateBusy||currentTask.maintenance||resettingTask)return '工作台正在维护或重置，请稍后重试。';
+    if(choosingDirectory)return '文件夹选择窗口尚未关闭，请完成选择或取消（可用 Alt+Tab 查找窗口）。';
+    if(pptxBusy||builderBusy)return '文件选择或配置处理尚未完成，请完成选择或取消后重试。';
+    if(!selected())return '请先选择左侧业务。';
+    if(licenseChecking)return '正在检查授权，请稍后重试。';
+    if(!moduleAllowed(selected()))return '当前业务未获得授权。';
+    if(isPptx(selected())&&!pptxReady)return '正在读取提取配置，请稍后重试。';
+    const missing=preparationItems().filter(item=>!item.optional&&!item.done);
+    if(missing.length)return '请完成以下项目后再启动：\n'+missing.map(item=>'• '+item.label).join('\n');
+    if(!isPptx(selected())&&!isPrintOperation(selected())&&!isTemplateBuilder(selected())&&!/^https?:\/\//.test(selected().url||''))return '业务地址无法识别，请联系维护人员。';
+    return '';
+  }
+  const selectionButtons='#chooseOriginalDir,#chooseConvertedDir,#uploadTemplate,[data-network-upload],#pptxChooseInputs,#pptxReplaceInputs,#pptxChooseTemplate,#pptxChooseOutput,#pptxChooseInputsNetwork,#pptxChooseTemplateNetwork,#builderChoosePptx,#builderChooseXlsx,#builderChoosePptxNetwork,#builderChooseXlsxNetwork,#uploadSupplierMapping';
+  function renderSelectionButtons(){for(const button of document.querySelectorAll(selectionButtons))button.disabled=false}
+  document.addEventListener('click',event=>{
+    const button=event.target.closest(selectionButtons);if(!button)return;
+    let message='';
+    if(taskRunning())message='任务正在运行，请等待完成或停止任务后修改配置。';
+    else if(updateBusy||currentTask.maintenance||exiting||resettingTask)message='工作台正在更新、退出或重置，请稍后重试。';
+    else if(choosingDirectory||pptxBusy||builderBusy||supplierMappingBusy||document.querySelector('[data-network-upload][data-busy="true"]'))message='上一次选择或配置处理尚未结束。请检查系统选择窗口（Windows 可按 Alt+Tab），完成或取消后重试。若已关闭选择窗口但仍持续提示，请刷新工作台恢复界面。';
+    else if(isPptx(selected())&&!pptxReady)message='正在读取上次配置，请稍候重试。';
+    if(message){event.preventDefault();event.stopImmediatePropagation();showStartNotice(message)}
+  },true);
+  const beforePreparationRenderTask=renderTask;renderTask=()=>{try{beforePreparationRenderTask();renderPreparation()}finally{renderSelectionButtons()}};
+  startUiReady=true;
   refresh();

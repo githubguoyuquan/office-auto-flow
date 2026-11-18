@@ -123,7 +123,10 @@ $d.Title = $env:AIOA_PICKER_TITLE
 $d.CheckFileExists = $true
 $d.CheckPathExists = $true
 $d.RestoreDirectory = $true
-try { if ($d.ShowDialog() -eq 'OK') { ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { '[]' } } finally { $d.Dispose() }'''
+$owner = New-Object System.Windows.Forms.Form
+$owner.TopMost = $true
+$owner.ShowInTaskbar = $false
+try { if ($d.ShowDialog($owner) -eq 'OK') { ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { '[]' } } finally { $d.Dispose(); $owner.Dispose() }'''
         command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
         label = "PowerPoint 文件" if kind == "pptx" else "Excel 工作簿"
         env = dict(os.environ, AIOA_FILE_KIND=kind,
@@ -151,7 +154,10 @@ end run'''
         command, env = ["osascript", "-e", script, kind, "multiple" if allow_multiple else "single"], None
     else:
         raise ValueError("本地文件选择目前支持 Windows 和 macOS。")
-    result = subprocess.run(command, capture_output=True, encoding="utf-8", env=env)
+    try:
+        result = subprocess.run(command, capture_output=True, encoding="utf-8", env=env, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise ValueError("文件选择已超时，请重新选择或使用网络路径输入。") from None
     if result.returncode:
         raise ValueError("无法打开文件选择窗口。")
     paths = json.loads(result.stdout or "[]") if sys.platform == "win32" else result.stdout.strip().splitlines()

@@ -178,16 +178,22 @@ def choose_directory(initial: str) -> str:
                 $dialog.Description = 'Select output folder'
                 $dialog.SelectedPath = $env:AIOA_PICKER_INITIAL
                 $dialog.ShowNewFolderButton = $true
+                $owner = New-Object System.Windows.Forms.Form
+                $owner.TopMost = $true
+                $owner.ShowInTaskbar = $false
                 try {
-                    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                    if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
                         [Console]::Write($dialog.SelectedPath)
                     }
-                } finally { $dialog.Dispose() }'''
+                } finally { $dialog.Dispose(); $owner.Dispose() }'''
             command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
             environment = dict(os.environ, AIOA_PICKER_INITIAL=str(start))
         else:
             raise ValueError("文件夹选择目前支持 Windows 和 macOS。")
-        result = subprocess.run(command, capture_output=True, encoding="utf-8", env=environment)
+        try:
+            result = subprocess.run(command, capture_output=True, encoding="utf-8", env=environment, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise ValueError("文件夹选择已超时，请重新选择，或直接填写保存目录。") from None
         if result.returncode:
             raise ValueError("无法打开系统文件夹选择窗口，请重试。")
         return result.stdout.strip()

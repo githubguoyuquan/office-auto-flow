@@ -69,7 +69,7 @@ class SupplierExportTests(unittest.TestCase):
 
     def test_existing_supplier_columns_are_reused(self):
         self.make_template(("辅料编号", "名称", "供应商1", "供应商2"))
-        export_trim_xlsx(self.template, [[['辅料编号', '001'], ['名称', '纽扣']]],
+        export_trim_xlsx(self.template, [[['辅料编号', '001'], ['名称', '纽扣'], ['颜色', '白']]],
                          self.destination, supplier_lookup=lambda _: ("供应商甲", ""))
         book = load_workbook(self.destination)
         try:
@@ -86,6 +86,20 @@ class SupplierExportTests(unittest.TestCase):
             export_trim_xlsx(self.template, [[['辅料编号', '001'], ['名称', '纽扣']]],
                 self.destination, supplier_lookup=Mock(side_effect=RuntimeError("查询失败")))
         self.assertEqual(self.destination.read_bytes(), b"existing output")
+
+    def test_lookup_uses_source_code_not_output_template(self):
+        self.make_template(headers=("名称", "颜色"))
+        lookup = Mock(return_value=("供应商甲", ""))
+        export_trim_xlsx(self.template, [[['辅料编号', '001'], ['名称', '纽扣'], ['颜色', '白']]],
+                         self.destination, supplier_lookup=lookup)
+        lookup.assert_called_once_with('001')
+        book = load_workbook(self.destination)
+        try:
+            self.assertEqual(book.active.cell(3, 1).value, '纽扣')
+            self.assertEqual(book.active.cell(3, 3).value, '供应商甲')
+            self.assertNotIn('辅料编号', [cell.value for cell in book.active[2]])
+        finally:
+            book.close()
 
 
 if __name__ == "__main__":

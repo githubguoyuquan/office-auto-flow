@@ -155,7 +155,7 @@
     $('pptxSaveStatus').textContent=pptxBusyMessage||pptxSaveStatus;
     aliasSettingsButton.disabled=active||pptxBusy||!pptxReady;
     for(const el of rulesModal.querySelectorAll('button,input,select'))el.disabled=active||pptxBusy;
-    if(local){const missing=[];if(!pptx.inputs.length)missing.push('选择工艺单');if(!pptx.template||!pptxAnalysis)missing.push('选择有效模板');const own=currentTask.operation==='PPTX 面辅料提取';$('runButton').disabled=!canRun(selected());$('runButton').textContent=pptxBusy?'处理中…':active?(own?'正在提取…':'任务运行中'):own&&currentTask.phase==='done'?'再次提取':'开始提取';$('composerCopy').firstChild.textContent=pptx.inputs.length?`${pptx.inputs.length} 个文件 → 1 份汇总表`:'准备提取工艺单';$('composerCopy').lastElementChild.textContent=!pptxReady?'正在恢复上次配置…':pptxBusyMessage|| (missing.length?'还需：'+missing.join('、'):active?'可点击“停止任务”取消':'已就绪，开始后自动保存当前配置');document.querySelector('.fine-print').textContent=pptxNeedsSuppliers()?'供应商补全复用 OA 登录状态，映射表在应用配置中管理。':'文件保留在本机，当前模板无需供应商查询。'}else{document.querySelector('.fine-print').textContent='密码不会保存；登录状态保存在本机浏览器配置中，OA 会话失效后需重新登录。'}
+    if(local){const missing=[];if(!pptx.inputs.length)missing.push('选择工艺单');if(!pptx.template||!pptxAnalysis)missing.push('选择有效模板');const own=currentTask.operation==='PPTX 面辅料提取';$('runButton').textContent=pptxBusy?'处理中…':active?(own?'正在提取…':'任务运行中'):own&&currentTask.phase==='done'?'再次提取':'开始提取';$('composerCopy').firstChild.textContent=pptx.inputs.length?`${pptx.inputs.length} 个文件 → 1 份汇总表`:'准备提取工艺单';$('composerCopy').lastElementChild.textContent=!pptxReady?'正在恢复上次配置…':pptxBusyMessage|| (missing.length?'还需：'+missing.join('、'):active?'可点击“停止任务”取消':'已就绪，开始后自动保存当前配置');document.querySelector('.fine-print').textContent=pptxNeedsSuppliers()?'供应商补全复用 OA 登录状态，映射表在应用配置中管理。':'文件保留在本机，当前模板无需供应商查询。'}else{document.querySelector('.fine-print').textContent='密码不会保存；登录状态保存在本机浏览器配置中，OA 会话失效后需重新登录。'}
     exitButton.disabled=choosingDirectory||pptxBusy||exiting;
     pptxCopyResult.hidden=currentTask.operation!=='PPTX 面辅料提取'||currentTask.phase!=='done'||!currentTask.output_path;
     if(currentTask.operation==='PPTX 面辅料提取'&&currentTask.content){$('resultHeading').textContent='提取结果';$('resultTitle').textContent='面辅料汇总 XLSX'}
@@ -175,5 +175,5 @@
       const text=document.createElement('span');text.className='step-label';text.textContent=label;step.dataset.step=key;step.append(number,text);timeline.append(step);
     }
   };
-  $('runButton').addEventListener('click',event=>{if(!isPptx(selected()))return;event.stopImmediatePropagation();if(!canRun(selected()))return;pptxAction(async()=>{await pptxSave();await api('/api/pptx/run','POST',pptx);await refresh()})},true);
+  $('runButton').addEventListener('click',event=>{if(!isPptx(selected()))return;event.stopImmediatePropagation();if(!canRun(selected()))return;pptxAction(async()=>{if(pptxNeedsSuppliers())await ensureOASettings();await pptxSave();await api('/api/pptx/run','POST',pptx);await refresh()})},true);
   (async()=>{try{const saved=await api('/api/pptx/settings');pptx={...pptx,...saved,inputs:[]};if(pptx.template)await pptxAnalyze(true)}catch(error){pptxError(error)}finally{pptxReady=true;renderTask()}})();

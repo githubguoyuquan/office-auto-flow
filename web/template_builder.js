@@ -97,6 +97,6 @@
   const beforeBuilderRenderTask=renderTask;renderTask=()=>{
     beforeBuilderRenderTask();const local=isTemplateBuilder(selected());document.body.classList.toggle('template-builder-view',local);builderPanel.hidden=!local;renderBuilderControls();
     if(local)document.querySelector('.fine-print').textContent='识别结果只作为候选字段，下载前可修改或删除。';
-    if(builderBusy){$('runButton').disabled=true;resetTaskButton.disabled=true;exitButton.disabled=true}
+    if(builderBusy){resetTaskButton.disabled=true;exitButton.disabled=true}
   };
   drawBuilder();

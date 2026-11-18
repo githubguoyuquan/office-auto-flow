@@ -13,6 +13,22 @@ from pptx_service import ExtractionCancelled, invoke, prepare_request, load_sett
 
 
 class PptxServiceTests(unittest.TestCase):
+    def test_picker_timeout_allows_retry(self):
+        with patch('pptx_service.sys.platform','win32'), patch('pptx_service.subprocess.run') as run:
+            run.side_effect = [subprocess.TimeoutExpired('powershell',300), subprocess.CompletedProcess([],0,'[]','')]
+            with self.assertRaisesRegex(ValueError,'超时'):
+                choose_files('pptx')
+            self.assertEqual(choose_files('pptx'), [])
+            self.assertEqual(run.call_args.kwargs['timeout'],300)
+
+    def test_directory_timeout_releases_picker_lock(self):
+        import oa_login_cli as app
+        with patch.object(app.sys,'platform','win32'), patch.object(app.subprocess,'run') as run:
+            run.side_effect = [subprocess.TimeoutExpired('powershell',300), subprocess.CompletedProcess([],0,'','')]
+            with self.assertRaisesRegex(ValueError,'超时'):
+                app.choose_directory('')
+            self.assertEqual(app.choose_directory(''), '')
+
     def test_windows_picker_all_files_filter_and_single_replacement(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'中文.PPTX';path.touch()

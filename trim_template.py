@@ -95,12 +95,15 @@ def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
         supplier_values = []
         supplier_missing = 0
         if supplier_lookup is not None:
-            code_columns = [col for col, field in mapping.items()
-                            if _key(sheet.cell(header_row, col).value) == _key(material_header)
-                            or _key(field) == _key(material_header)]
-            if len(code_columns) != 1:
-                raise ValueError(f"模板中必须有且只有一列“{material_header}”，才能查询供应商。")
-            code_field = mapping[code_columns[0]]
+            # Lookup uses source records, independently of the customer's output columns.
+            source_fields = list(dict.fromkeys(field for record in records for field in record))
+            code_fields = [field for field in source_fields if _key(field) == _key(material_header)]
+            if not code_fields:
+                code_fields = list(dict.fromkeys(field for col, field in mapping.items()
+                    if _key(sheet.cell(header_row, col).value) == _key(material_header)))
+            if len(code_fields) != 1:
+                raise ValueError(f"源辅料数据中无法唯一识别“{material_header}”字段，请核对源工艺单的编号字段名称。")
+            code_field = code_fields[0]
             cache = {}
             for record in records:
                 code = str(record.get(code_field, "")).strip()
