@@ -12,16 +12,7 @@ if (-not $PublicKeys) {
     $dialog.Dispose()
 }
 $PublicKeys = (Resolve-Path -LiteralPath $PublicKeys).Path
-if (-not $UpdatePublicKeys) {
-    Add-Type -AssemblyName System.Windows.Forms
-    $dialog = New-Object System.Windows.Forms.OpenFileDialog
-    $dialog.Title = "Select independent update-public-keys.json"
-    $dialog.Filter = "Update public keys|update-public-keys.json|JSON files|*.json"
-    if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { exit 1 }
-    $UpdatePublicKeys = $dialog.FileName
-    $dialog.Dispose()
-}
-$UpdatePublicKeys = (Resolve-Path -LiteralPath $UpdatePublicKeys).Path
+if ($UpdatePublicKeys) { $UpdatePublicKeys = (Resolve-Path -LiteralPath $UpdatePublicKeys).Path }
 $nsisRoot = Join-Path ${env:ProgramFiles(x86)} "NSIS"
 $makensis = Join-Path $nsisRoot "makensis.exe"
 if (-not (Test-Path -LiteralPath $makensis)) { throw "Install NSIS 3 before building: https://nsis.sourceforge.io/Download" }
@@ -38,7 +29,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
     $buildStamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $payload = Join-Path $projectRoot "preview\AIOA-Licensed-$buildStamp"
-    & $buildPython packaging/build_compiled.py --public-keys $PublicKeys --update-public-keys $UpdatePublicKeys --output $payload
+    $buildArgs = @("packaging/build_compiled.py", "--public-keys", $PublicKeys, "--output", $payload)
+    if ($UpdatePublicKeys) { $buildArgs += @("--update-public-keys", $UpdatePublicKeys) }
+    & $buildPython @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed. Install Visual Studio 2022 C++ build tools if required." }
     & (Join-Path $payload "AIOA.exe") --self-test
     if ($LASTEXITCODE -ne 0) { throw "Compiled program self-test failed." }

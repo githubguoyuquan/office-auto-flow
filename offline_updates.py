@@ -49,15 +49,19 @@ def _json(raw):
         raise UpdateError("更新数据格式无效。") from error
 
 
-def verify_manifest(raw, public_keys):
+def verify_manifest(raw, public_keys, *, allow_unsigned=False):
     if len(raw) > MAX_MANIFEST_BYTES:
         raise UpdateError("更新清单过大。")
     envelope = _json(raw)
     try:
         manifest = envelope["manifest"]
-        key = public_keys[envelope["key_id"]]
-        signature = base64.b64decode(envelope["signature"], validate=True)
-        Ed25519PublicKey.from_public_bytes(key).verify(signature, canonical(manifest))
+        if envelope.get("unsigned") is True and allow_unsigned:
+            if set(envelope) != {"manifest", "unsigned"}:
+                raise UpdateError("免签名更新清单字段无效。")
+        else:
+            key = public_keys[envelope["key_id"]]
+            signature = base64.b64decode(envelope["signature"], validate=True)
+            Ed25519PublicKey.from_public_bytes(key).verify(signature, canonical(manifest))
     except (KeyError, TypeError, ValueError, InvalidSignature, RecursionError) as error:
         raise UpdateError("更新包签名无效或发布者不受信任。") from error
     if not isinstance(manifest, dict) or manifest.get("product") != PRODUCT:
@@ -100,9 +104,10 @@ def _atomic_json(path, value):
 
 
 class UpdateStore:
-    def __init__(self, directory, public_keys):
+    def __init__(self, directory, public_keys, *, allow_unsigned=False):
         self.root = Path(directory)
         self.keys = dict(public_keys)
+        self.allow_unsigned = bool(allow_unsigned)
 
     @contextmanager
     def _lock(self):
@@ -155,7 +160,7 @@ class UpdateStore:
         manifest_path = root / "update.json"
         if manifest_path.is_symlink() or manifest_path.stat().st_size > MAX_MANIFEST_BYTES:
             raise UpdateError("更新清单无效。")
-        manifest = verify_manifest(manifest_path.read_bytes(), self.keys)
+        manifest = verify_manifest(manifest_path.read_bytes(), self.keys, allow_unsigned=self.allow_unsigned)
         for name, metadata in manifest["files"].items():
             path = root / name
             relative_parts = [root.joinpath(*Path(name).parts[:index])
@@ -189,7 +194,7 @@ class UpdateStore:
                     if info.file_size > MAX_MANIFEST_BYTES:
                         raise UpdateError("更新清单过大。")
                     raw = archive.read(info)
-                    manifest = verify_manifest(raw, self.keys)
+                    manifest = verify_manifest(raw, self.keys, allow_unsigned=self.allow_unsigned)
                     threshold = max(state["highest_sequence"], minimum_sequence)
                     if manifest["sequence"] <= threshold:
                         raise UpdateError(f"更新包版本不高于已安装版本（最低序号：{threshold}）。")

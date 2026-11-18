@@ -23,12 +23,12 @@ DEFAULT_OUTPUT = ROOT / "preview" / "Office-Auto-Flow-API-Setup-67b91cf-win-x64.
 
 def validate_update_metadata(manifest):
     identifiers = manifest.get("update_public_key_ids")
-    if (not isinstance(identifiers, list) or not identifiers
+    if (not isinstance(identifiers, list)
             or any(not isinstance(name, str) or len(name) != 16
                    or any(char not in "0123456789abcdef" for char in name) for name in identifiers)
             or len(set(identifiers)) != len(identifiers)
             or set(identifiers) & set(manifest.get("public_key_ids", []))):
-        raise ValueError("编译产物必须包含独立的更新发布公钥。")
+        raise ValueError("编译产物更新公钥列表格式无效。")
     if type(manifest.get("update_base_api")) is not int or manifest["update_base_api"] != BASE_API:
         raise ValueError("编译产物的更新接口版本不兼容。")
     if type(manifest.get("update_base_sequence")) is not int or manifest["update_base_sequence"] < 1:

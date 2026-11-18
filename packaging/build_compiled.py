@@ -42,12 +42,12 @@ def load_public_keys(path):
 
 
 def write_verification_keys(source, license_keys, update_keys, base_sequence=None):
-    if not license_keys or not update_keys:
-        raise ValueError("许可证公钥和更新发布公钥都必须配置。")
+    if not license_keys:
+        raise ValueError("必须配置软件许可证公钥。")
     if set(license_keys) & set(update_keys) or set(license_keys.values()) & set(update_keys.values()):
         raise ValueError("更新发布密钥必须独立创建，不能复用软件许可证密钥。")
     if base_sequence is None:
-        base_sequence = int(datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
+        base_sequence = 1
     if type(base_sequence) is not int or base_sequence < 1:
         raise ValueError("基础版本序号必须是正整数。")
     (source / "license_keys.py").write_text("PUBLIC_KEYS = " + repr(license_keys) + "\n", encoding="utf-8")
@@ -73,8 +73,6 @@ def main():
     if args.target == "workbench" and not keys:
         parser.error("必须指定 --public-keys public-keys.json。")
     update_keys = load_public_keys(args.update_public_keys) if args.target == "workbench" and args.update_public_keys else {}
-    if args.target == "workbench" and not update_keys:
-        parser.error("必须指定 --update-public-keys update-public-keys.json。")
     if args.jobs < 1:
         parser.error("--jobs 必须大于 0。")
     with tempfile.TemporaryDirectory(prefix="aioa-compile-") as temporary:

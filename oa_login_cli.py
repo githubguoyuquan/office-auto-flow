@@ -1735,9 +1735,9 @@ if __name__ == "__main__":
             raise SystemExit("No embedded public keys configured.")
         for public in PUBLIC_KEYS.values():
             Ed25519PublicKey.from_public_bytes(public)
-        if (not UPDATE_PUBLIC_KEYS or set(UPDATE_PUBLIC_KEYS) & set(PUBLIC_KEYS)
+        if (set(UPDATE_PUBLIC_KEYS) & set(PUBLIC_KEYS)
                 or type(BASE_RELEASE_SEQUENCE) is not int or BASE_RELEASE_SEQUENCE < 1):
-            raise SystemExit("Independent update verification keys are required.")
+            raise SystemExit("Update trust configuration is invalid.")
         for public in UPDATE_PUBLIC_KEYS.values():
             Ed25519PublicKey.from_public_bytes(public)
         node, driver = compute_driver_executable()

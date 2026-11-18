@@ -136,7 +136,7 @@
     $('rollbackSoftware').disabled=busy||active||exiting||!updateStatus.can_rollback;
     $('closeSettings').disabled=updateBusy;
     $('importSoftwareUpdate').textContent=updateBusy?'正在处理…':'导入更新包';
-    $('softwareUpdateMessage').textContent=busy?'更新正在处理中，请保持工作台打开。':active?'任务运行期间不能更新，请等待任务结束。':updateStatus.error||(!updateStatus.enabled?'当前版本尚未启用离线更新，请安装支持更新的基础版本。':'更新包会经过签名与完整性校验。');
+    $('softwareUpdateMessage').textContent=busy?'更新正在处理中，请保持工作台打开。':active?'任务运行期间不能更新，请等待任务结束。':updateStatus.error||(!updateStatus.enabled?'当前版本尚未启用离线更新，请安装支持更新的基础版本。':'更新包会检查文件结构、版本和文件完整性。');
   }
   async function loadUpdateStatus(){
     try{updateStatus=await api('/api/updates/status');renderUpdates()}

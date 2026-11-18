@@ -107,6 +107,42 @@ def make_package(web_root, version, sequence, key, component=None):
     return package
 
 
+def make_unsigned_package(web_root, version, sequence, component=None):
+    if not isinstance(version, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", version):
+        raise UpdateError("版本名称仅支持 1 至 64 位英文字母、数字、点、下划线和短横线。")
+    if type(sequence) is not int or sequence < 1:
+        raise UpdateError("版本序号必须是正整数。")
+    files = {}
+    for name in sorted(WEB_FILES):
+        path = Path(web_root) / Path(name).name
+        if path.is_symlink() or not path.is_file():
+            raise UpdateError(f"界面文件缺失或无效：{path.name}")
+        files[name] = path.read_bytes()
+    with tempfile.TemporaryDirectory(prefix="oaf-update-check-") as temporary:
+        root = Path(temporary)
+        (root / "web").mkdir()
+        for name, data in files.items():
+            (root / name).write_bytes(data)
+        UpdateManager.healthcheck(root)
+    if component:
+        binary = Path(component).read_bytes()
+        offset = int.from_bytes(binary[60:64], "little") if len(binary) >= 64 else -1
+        if not binary.startswith(b"MZ") or offset < 64 or binary[offset:offset + 6] != b"PE\x00\x00\x64\x86":
+            raise UpdateError("提取组件不是 Windows x64 可执行文件。")
+        files["pptx_extractor/bin/pptx-extractor.exe"] = binary
+    manifest = {"format": 1, "product": PRODUCT, "base_api": BASE_API,
+                "version": version, "sequence": sequence,
+                "files": {name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+                          for name, data in files.items()}}
+    envelope = {"manifest": manifest, "unsigned": True}
+    result = io.BytesIO()
+    with ZipFile(result, "w", ZIP_DEFLATED, compresslevel=9) as archive:
+        archive.writestr("update.json", canonical(envelope))
+        for name, data in files.items():
+            archive.writestr("payload/" + name, data)
+    return result.getvalue()
+
+
 class Publisher:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -249,6 +285,12 @@ def main():
     build.add_argument("--version", required=True)
     build.add_argument("--sequence", type=int)
     build.add_argument("--component", type=Path)
+    unsigned = subparsers.add_parser("build-unsigned")
+    unsigned.add_argument("--web-root", type=Path, default=ROOT / "web")
+    unsigned.add_argument("--output", type=Path, required=True)
+    unsigned.add_argument("--version", required=True)
+    unsigned.add_argument("--sequence", type=int, required=True)
+    unsigned.add_argument("--component", type=Path)
     for command in (build, subparsers.add_parser("serve")):
         command.add_argument("--state-dir", type=Path, default=ROOT / ".secrets/update-publisher")
     server_parser = subparsers.choices["serve"]
@@ -290,6 +332,14 @@ def main():
                     args.output.unlink(missing_ok=True)
                 raise
             print(f"更新包：{args.output}\n大小：{len(package)} bytes\nSHA-256：{hashlib.sha256(package).hexdigest()}")
+        elif args.command == "build-unsigned":
+            if args.output.exists():
+                raise UpdateError("输出文件已存在，请指定新的文件名。")
+            package = make_unsigned_package(args.web_root, args.version, args.sequence, args.component)
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with args.output.open("xb") as stream:
+                stream.write(package)
+            print(f"更新包：{args.output}\n大小：{len(package)} bytes")
         else:
             server = serve(Publisher(args.state_dir), args.port, not args.no_browser)
             try:
