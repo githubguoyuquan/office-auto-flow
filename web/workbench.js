@@ -92,6 +92,7 @@
   function renderDetail(){const item=selected();const box=$('selectionDetail');box.replaceChildren();if(!item){box.className='detail-none';box.textContent='尚未选择业务操作';return}box.className='';const n=document.createElement('div');n.className='selected-name';n.textContent=item.name;const u=document.createElement('p');u.className='selected-url';u.textContent=item.url;box.append(n,u);if(item.login_url){const login=document.createElement('p');login.className='selected-url';login.textContent='登录页：'+item.login_url;box.append(login)}}
   function renderTask(){
     renderSupplierMapping();
+    for(const button of document.querySelectorAll('[data-network-upload]'))button.disabled=taskRunning()||!!currentTask.maintenance||button.dataset.busy==='true';
     if($('clearStyleCodesFile'))$('clearStyleCodesFile').disabled=taskRunning()||!$('styleCodesFile').files.length;
     exitButton.disabled=choosingDirectory||exiting;
     $('printFields').hidden=!isPrintOperation(selected());for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory','templateFile','uploadTemplate'])$(id).disabled=taskRunning();
@@ -118,6 +119,31 @@
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
   const refreshTimer=setInterval(refresh,1300);
   exitButton.addEventListener('click',async()=>{if(taskRunning()&&!confirm('当前任务正在运行，退出会停止任务。确定退出工作台吗？'))return;exiting=true;exitButton.disabled=true;exitButton.textContent='正在退出…';try{await api('/api/shutdown','POST',{});clearInterval(refreshTimer);$('statusMessage').textContent='正在停止任务并关闭自动化浏览器，请稍候…';$('runButton').disabled=true;$('stopButton').disabled=true;const timer=setInterval(async()=>{try{await api('/api/state')}catch(_){clearInterval(timer);$('statusMessage').textContent='工作台服务已停止，可以关闭此页面。';exitButton.textContent='工作台已退出'}},1000)}catch(error){exiting=false;exitButton.disabled=false;exitButton.textContent='退出工作台';toast(error.message)}});
+  let networkResolve=null;
+  const networkModal=document.createElement('div');networkModal.className='modal-backdrop';
+  networkModal.innerHTML=`<section class="modal" role="dialog" aria-modal="true" aria-labelledby="networkTitle"><div class="modal-top"><h3 id="networkTitle">网络文件路径</h3><button id="networkCancel" type="button" class="ghost">取消</button></div><p>支持 Windows 共享目录、映射盘及本机绝对路径。可粘贴资源管理器“复制文件地址”的内容。</p><label class="field-label" for="networkPath">文件完整路径</label><textarea id="networkPath" class="field" rows="5" style="height:120px;resize:vertical" spellcheck="false"></textarea><p id="networkHint"></p><div class="modal-actions"><button id="networkConfirm" type="button" class="primary">读取文件</button></div></section>`;
+  document.body.append(networkModal);
+  function networkPaths(kind,multiple=false){
+    if(networkResolve)return Promise.reject(Error('路径窗口已打开'));
+    $('networkPath').value='';$('networkHint').textContent=multiple?'每行填写一个 '+kind.toUpperCase()+' 文件路径。':'填写一个 '+kind.toUpperCase()+' 文件路径。';
+    networkModal.classList.add('open');$('networkPath').focus();
+    return new Promise(resolve=>networkResolve=resolve);
+  }
+  function closeNetwork(paths){networkModal.classList.remove('open');const resolve=networkResolve;networkResolve=null;if(resolve)resolve(paths)}
+  $('networkConfirm').onclick=()=>{const paths=$('networkPath').value.split(/\r?\n/).map(path=>path.trim()).filter(Boolean);if(paths.length)closeNetwork(paths);else $('networkPath').focus()};
+  $('networkCancel').onclick=()=>closeNetwork(null);
+  networkModal.onclick=event=>{if(event.target===networkModal)closeNetwork(null)};
+  networkModal.onkeydown=event=>{if(event.key==='Escape'){event.stopPropagation();closeNetwork(null)}};
+  async function pickFiles(kind,options={}){
+    const body={kind};if(options.multiple!==undefined)body.multiple=options.multiple;
+    if(options.network){const paths=await networkPaths(kind,kind==='pptx'&&options.multiple!==false);if(!paths)return {paths:[]};body.paths=paths}
+    return api('/api/pptx/files','POST',body);
+  }
+  for(const [target,label] of [['styleCodesFile','网络批量文件'],['templateFile','网络模板'],['supplierMappingFile','网络映射表']]){
+    const button=document.createElement('button');button.type='button';button.className='ghost';button.id=target+'Network';button.dataset.networkUpload='true';button.textContent=label;
+    (target==='templateFile'?$('uploadTemplate'):target==='supplierMappingFile'?$('uploadSupplierMapping'):$(target)).after(button);
+    button.onclick=async()=>{if(taskRunning())return;button.dataset.busy='true';button.disabled=true;try{const paths=await networkPaths('xlsx');if(!paths)return;const result=await api('/api/local-xlsx','POST',{paths});const bytes=Uint8Array.from(atob(result.content),c=>c.charCodeAt(0));const transfer=new DataTransfer();transfer.items.add(new File([bytes],result.filename,{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));$(target).files=transfer.files;$(target).dispatchEvent(new Event('change',{bubbles:true}))}catch(error){toast(error.message)}finally{button.dataset.busy='false';button.disabled=false;renderTask()}};
+  }
   __PPTX_UI__
   let updateStatus={enabled:false,version:'正在读取…',can_rollback:false},updateBusy=false;
   const updateSection=document.createElement('section');

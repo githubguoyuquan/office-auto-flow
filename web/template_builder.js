@@ -74,6 +74,11 @@
     const result=await api('/api/template-builder/source','POST',{kind});if(result.cancelled)return;
     builderFields=result.fields.map(value=>({value}));builderFilename=result.filename;drawBuilder();
   });
+  for(const kind of ['pptx','xlsx']){
+    const button=document.createElement('button');button.type='button';button.className='ghost';button.id='builderNetwork'+kind;button.textContent='网络 '+kind.toUpperCase();
+    $('builderChoose'+(kind==='pptx'?'Pptx':'Xlsx')).after(button);
+    button.onclick=()=>builderAction(async()=>{const paths=await networkPaths(kind);if(!paths)return;const result=await api('/api/template-builder/source','POST',{kind,paths});builderFields=result.fields.map(value=>({value}));builderFilename=result.filename;drawBuilder()});
+  }
   $('builderReset').onclick=()=>{if(builderBusy||taskRunning())return;builderFields=[];builderFilename='';$('builderError').hidden=true;drawBuilder()};
   $('builderAddField').onclick=()=>{
     if(builderFields.length>=16384){showBuilderError(Error('模板最多 16384 列。'));return}

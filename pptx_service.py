@@ -87,6 +87,26 @@ def save_settings(directory, body):
     return dict(value, analysis=analysis)
 
 
+def validate_selected_paths(paths, kind, *, multiple=None):
+    if not isinstance(kind, str) or kind not in {"pptx", "xlsx"} or not isinstance(paths, list) or not paths:
+        raise ValueError("请填写有效的文件路径。")
+    if multiple is not None and type(multiple) is not bool:
+        raise ValueError("文件选择方式无效。")
+    if len(paths) > (1000 if kind == "pptx" and multiple is not False else 1):
+        raise ValueError("文件数量不符合要求，请检查路径列表。")
+    result = []
+    for value in paths:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("文件路径不能为空。")
+        value = value.strip()
+        if value.startswith('"') and value.endswith('"'):
+            value = value[1:-1]
+        if sys.platform != "win32" and (value.startswith("\\\\") or (len(value) > 2 and value[1] == ":")):
+            raise ValueError("Windows 共享路径或映射盘请在 Windows 客户端使用；Mac 请填写已挂载的 /Volumes 路径。")
+        result.append(validate_file(value, kind))
+    return list(dict.fromkeys(result))
+
+
 def choose_files(kind, *, multiple=None):
     if kind not in {"pptx", "xlsx"}:
         raise ValueError("文件类型无效。")

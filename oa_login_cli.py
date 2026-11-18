@@ -30,6 +30,7 @@ from pptx_service import (ExtractionCancelled, choose_files, executable as pptx_
                           invoke as invoke_pptx, prepare_request as prepare_pptx_request,
                           validate_file as validate_pptx_file)
 from pptx_service import load_settings as load_pptx_settings, save_settings as save_pptx_settings
+from pptx_service import validate_selected_paths
 from ui_resources import render_page
 from template_builder import collect_labels, create_template
 from pptx_suppliers import extract_with_suppliers as extract_pptx_with_suppliers, fill_suppliers
@@ -1571,7 +1572,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             limit = MAX_MAPPING_BYTES * 2
         elif self.path == "/api/run":
             limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
-        elif self.path in {"/api/pptx/run", "/api/pptx/template", "/api/pptx/settings", "/api/template-builder/download"}:
+        elif self.path in {"/api/pptx/run", "/api/pptx/template", "/api/pptx/settings", "/api/template-builder/download", "/api/pptx/files", "/api/template-builder/source"}:
             limit = 4 * 1024 * 1024
         else:
             limit = MAX_BODY_BYTES
@@ -1628,11 +1629,19 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
                     raise ValueError("文件选择窗口已打开。")
                 try:
-                    paths = choose_files(kind, multiple=False)
+                    paths = (validate_selected_paths(body["paths"], kind, multiple=False)
+                             if "paths" in body else choose_files(kind, multiple=False))
                 finally:
                     DIRECTORY_PICKER_LOCK.release()
                 self._send(200, {"fields": collect_labels(paths[0]), "filename": Path(paths[0]).name}
                            if paths else {"cancelled": True})
+            elif self.path == "/api/local-xlsx":
+                paths = validate_selected_paths(body.get("paths"), "xlsx", multiple=False)
+                with open(paths[0], "rb") as stream:
+                    content = stream.read(MAX_TEMPLATE_BYTES + 1)
+                if not content or len(content) > MAX_TEMPLATE_BYTES:
+                    raise ValueError("请选择 5 MB 以内的 XLSX 文件。")
+                self._send(200, {"filename": Path(paths[0]).name, "content": base64.b64encode(content).decode("ascii")})
             elif self.path == "/api/template-builder/download":
                 LICENSES.require_valid(feature="template_builder")
                 content = create_template(body.get("fields"))
@@ -1651,8 +1660,12 @@ class LocalHandler(BaseHTTPRequestHandler):
                 if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
                     raise ValueError("文件选择窗口已打开。")
                 try:
-                    paths = (choose_files(body.get("kind"), multiple=body["multiple"])
-                             if "multiple" in body else choose_files(body.get("kind")))
+                    if "paths" in body:
+                        paths = validate_selected_paths(body["paths"], body.get("kind"), multiple=body.get("multiple"))
+                    elif "multiple" in body:
+                        paths = choose_files(body.get("kind"), multiple=body["multiple"])
+                    else:
+                        paths = choose_files(body.get("kind"))
                 finally:
                     DIRECTORY_PICKER_LOCK.release()
                 self._send(200, {"paths": paths})
