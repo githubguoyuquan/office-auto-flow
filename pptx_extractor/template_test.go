@@ -43,6 +43,56 @@ func templateFixture(t *testing.T, modify func(string) string) string {
 	return p
 }
 
+func TestAlternativeTemplateHeaderFields(t *testing.T) {
+	for _, separator := range []string{"｜", "|"} {
+		header := " 不存在 " + separator + " 面料 " + separator + " 辅料编号 "
+		file := templateFixture(t, func(s string) string {
+			return sheetDataRE.ReplaceAllString(s, `<sheetData><row r="1">`+cell("A1", header, 3, false)+`</row></sheetData>`)
+		})
+		tpl, err := loadTemplate(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(tpl.Headers) != 1 || tpl.Mapping[0] != 2 {
+			t.Fatal(tpl.Headers, tpl.Mapping)
+		}
+		pages := []page{
+			{Tables: []table{{Kind: "辅料", Rows: [][]string{{"辅料编号"}, {"TRIM_ONLY"}}}}},
+			{Tables: []table{{Kind: "面料", Rows: [][]string{{"面料"}, {"FABRIC_FIRST"}}}, {Kind: "辅料", Rows: [][]string{{"辅料编号"}, {"TRIM_SECOND"}}}}},
+		}
+		content, err := tpl.build(extracted{Pages: pages})
+		if err != nil {
+			t.Fatal(err)
+		}
+		z, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range z.File {
+			if entry.Name != tpl.Sheet {
+				continue
+			}
+			r, _ := entry.Open()
+			raw, _ := io.ReadAll(r)
+			r.Close()
+			doc, err := parse(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values := map[string]string{}
+			for _, c := range doc.find("c") {
+				values[c.attr("r")] = templateValue(c, nil)
+			}
+			if values["A1"] != header || values["A2"] != "TRIM_ONLY" || values["A3"] != "FABRIC_FIRST" {
+				t.Fatalf("alternative fields: %#v", values)
+			}
+			if len(values) != 3 {
+				t.Fatalf("extra output columns: %#v", values)
+			}
+		}
+	}
+}
+
 func TestBlankTemplateColumnNeverBecomesImplicitSequence(t *testing.T) {
 	file := templateFixture(t, func(s string) string {
 		data := `<sheetData><row r="1">` + cell("A1", "款号", 3, false) + cell("B1", "", 3, false) + cell("C1", "数量", 3, false) + `</row><row r="2">` + cell("B2", "OLD", 1, false) + `</row></sheetData>`

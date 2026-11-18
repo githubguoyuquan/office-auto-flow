@@ -14,13 +14,15 @@ import (
 )
 
 type excelTemplate struct {
-	Parts    map[string][]byte
-	Sheet    string
-	Header   string
-	Mapping  []int
-	Styles   []int
-	RowAttrs string
-	Headers  []string
+	Candidates      [][]string
+	CandidateFields [][]int
+	Parts           map[string][]byte
+	Sheet           string
+	Header          string
+	Mapping         []int
+	Styles          []int
+	RowAttrs        string
+	Headers         []string
 }
 
 var sheetDataRE = regexp.MustCompile(`(?s)<sheetData(?:\s[^>]*)?>.*?</sheetData>`)
@@ -171,8 +173,7 @@ func loadTemplateWithRules(file string, rules []aliasRule) (*excelTemplate, erro
 	}
 	aliases := map[string]int{"款号": 0, "款式编号": 0, "款式号": 0, "产品款号": 0, "模特编号": 0, "STYLE": 0, "STYLENO": 0, "序号": 1, "编号": 1, "NO": 1, "面料": 2, "面料编号": 2, "面料编码": 2, "面料名称": 2, "FABRIC": 2, "面料颜色": 3, "面料色号": 3, "FABRICCOLOR": 3, "使用部位": 4, "部位": 4, "用途": 4, "辅料编号": 5, "辅料编码": 5, "辅料": 5, "辅料名称": 5, "辅料颜色": 6, "辅料色号": 6, "TRIMCOLOR": 6, "SIZE": 7, "尺寸": 7, "规格": 7, "数量": 8, "用量": 8, "QTY": 8, "QUANTITY": 8, "MEMO": 9, "备注": 9, "说明": 9,
 		"设计师": 10, "디자이너": 10, "年份": 11, "年度": 11, "연도": 11, "季节": 12, "시즌": 12, "TAG序号": 13, "TAGNO": 13, "TAGCOLOR": 14, "TAG颜色": 14, "TAG色号": 14, "TAGA": 15, "TAGB": 16, "TAGC": 17, "TAGD": 18}
-	for i := 1; i <= maxCol; i++ {
-		h := headers[i]
+	resolve := func(h string) int {
 		key := strings.TrimSuffix(norm(h), ".")
 		field, ok := aliases[key]
 		// Preserve the original template's explicit color/COLOR distinction.
@@ -190,6 +191,23 @@ func loadTemplateWithRules(file string, rules []aliasRule) (*excelTemplate, erro
 		if !ok {
 			field = -1
 		}
+		return field
+	}
+	for i := 1; i <= maxCol; i++ {
+		h := headers[i]
+		names := strings.FieldsFunc(h, func(r rune) bool { return r == '|' || r == '｜' })
+		fields := make([]int, 0, len(names))
+		field := -1
+		for j, name := range names {
+			names[j] = strings.TrimSpace(name)
+			f := resolve(names[j])
+			fields = append(fields, f)
+			if field < 0 && f >= 0 {
+				field = f
+			}
+		}
+		t.Candidates = append(t.Candidates, names)
+		t.CandidateFields = append(t.CandidateFields, fields)
 		t.Mapping = append(t.Mapping, field)
 		t.Headers = append(t.Headers, h)
 	}
@@ -232,6 +250,20 @@ func (t *excelTemplate) build(data extracted) ([]byte, error) {
 					v = src[field]
 				} else if field < 0 && ci < len(t.Headers) {
 					v = extras[norm(t.Headers[ci])]
+				}
+				if ci < len(t.Candidates) && ci < len(t.Headers) && strings.ContainsAny(t.Headers[ci], "|｜") {
+					v = ""
+					for j, name := range t.Candidates[ci] {
+						f := t.CandidateFields[ci][j]
+						value := extras[norm(name)]
+						if f >= 0 && f < len(src) {
+							value = src[f]
+						}
+						if strings.TrimSpace(value) != "" {
+							v, field = value, f
+							break
+						}
+					}
 				}
 				numeric := (field == 1 || field == 8 || field == 13) && numberRE.MatchString(v) && len(v) <= 15
 				sheet.WriteString(cell(col(ci+1)+strconv.Itoa(rowNum), v, t.Styles[ci], numeric))
