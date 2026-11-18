@@ -43,6 +43,56 @@ func templateFixture(t *testing.T, modify func(string) string) string {
 	return p
 }
 
+func TestBlankTemplateColumnNeverBecomesImplicitSequence(t *testing.T) {
+	file := templateFixture(t, func(s string) string {
+		data := `<sheetData><row r="1">` + cell("A1", "款号", 3, false) + cell("B1", "", 3, false) + cell("C1", "数量", 3, false) + `</row><row r="2">` + cell("B2", "OLD", 1, false) + `</row></sheetData>`
+		return sheetDataRE.ReplaceAllString(s, data)
+	})
+	tpl, err := loadTemplate(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tpl.Mapping[1] != -1 {
+		t.Fatalf("blank header mapped to %d", tpl.Mapping[1])
+	}
+	// Simulate a mapping saved by an older client.
+	tpl.Mapping[1] = 1
+	content, err := tpl.build(extracted{Pages: []page{{Code: "STYLE", Tables: []table{{Kind: "辅料", Rows: [][]string{{"辅料编号", "数量", "模板外字段"}, {"TRIM", "2", "MUST_NOT_EXPORT"}}}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range z.File {
+		if entry.Name != tpl.Sheet {
+			continue
+		}
+		r, err := entry.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, err := io.ReadAll(r)
+		r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range doc.find("c") {
+			if c.attr("r") == "B2" && templateValue(c, nil) != "" {
+				t.Fatal("blank template column contains generated data")
+			}
+		}
+		if bytes.Contains(raw, []byte("MUST_NOT_EXPORT")) {
+			t.Fatal("source-only field was exported")
+		}
+	}
+}
+
 func TestFlexibleTemplateColumns(t *testing.T) {
 	for _, headers := range [][]string{{"客户款式", "数量", "采购负责人"}, {"款号", "面料", "面料颜色", "使用部位", "辅料编号", "辅料颜色", "SIZE", "数量", "MEMO", "供应商", "交期", "备注"}} {
 		file := templateFixture(t, func(s string) string {

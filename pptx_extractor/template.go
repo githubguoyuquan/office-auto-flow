@@ -184,10 +184,6 @@ func loadTemplateWithRules(file string, rules []aliasRule) (*excelTemplate, erro
 			field = 6
 			ok = true
 		}
-		if h == "" && i == 2 && norm(headers[1]) == "款号" {
-			field = 1
-			ok = true
-		}
 		if custom, found := aliasTarget(h, rules); found {
 			field, ok = custom, true
 		}
@@ -229,9 +225,12 @@ func (t *excelTemplate) build(data extracted) ([]byte, error) {
 			fmt.Fprintf(&sheet, `<row r="%d"%s>`, rowNum, t.RowAttrs)
 			for ci, field := range t.Mapping {
 				v := ""
-				if field >= 0 && field < len(src) {
+				// Blank template columns are layout space, never output fields.
+				if ci < len(t.Headers) && strings.TrimSpace(t.Headers[ci]) == "" {
+					field = -1
+				} else if field >= 0 && field < len(src) {
 					v = src[field]
-				} else if field < 0 {
+				} else if field < 0 && ci < len(t.Headers) {
 					v = extras[norm(t.Headers[ci])]
 				}
 				numeric := (field == 1 || field == 8 || field == 13) && numberRE.MatchString(v) && len(v) <= 15
