@@ -101,6 +101,16 @@ class SupplierExportTests(unittest.TestCase):
         finally:
             book.close()
 
+    def test_real_oa_code_header_ignores_old_material_code(self):
+        self.make_template(headers=("Description(描述)", "Color"))
+        lookup = Mock(return_value=("供应商甲", ""))
+        export_trim_xlsx(self.template, [[
+            ['Code(编号)', '2LBWLPE0191', 'TTA1766'],
+            ['Description(描述)', '唛头', '蕾丝'], ['Color', 'WHITE', 'A'],
+            ['oldMaterialCode', 'TTL1696', 'OLD'], ['Supplier1', '160027', ''],
+        ]], self.destination, supplier_lookup=lookup)
+        self.assertEqual([call.args[0] for call in lookup.call_args_list], ['2LBWLPE0191', 'TTA1766'])
+
 
 if __name__ == "__main__":
     unittest.main()

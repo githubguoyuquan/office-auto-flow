@@ -99,14 +99,20 @@ def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
             source_fields = list(dict.fromkeys(field for record in records for field in record))
             code_fields = [field for field in source_fields if _key(field) == _key(material_header)]
             if not code_fields:
+                aliases = {_key(value) for value in ("辅料编号", "Code(编号)", "编号(Code)", "Material Code", "辅料编号 Trim Code")}
+                code_fields = [field for field in source_fields if _key(field) in aliases]
+            if not code_fields:
                 code_fields = list(dict.fromkeys(field for col, field in mapping.items()
                     if _key(sheet.cell(header_row, col).value) == _key(material_header)))
-            if len(code_fields) != 1:
-                raise ValueError(f"源辅料数据中无法唯一识别“{material_header}”字段，请核对源工艺单的编号字段名称。")
-            code_field = code_fields[0]
+            if not code_fields:
+                raise ValueError(f"源辅料数据缺少编号字段，实际字段：{'、'.join(source_fields)}")
             cache = {}
             for record in records:
-                code = str(record.get(code_field, "")).strip()
+                codes = {str(record.get(field, "")).strip() for field in code_fields
+                         if str(record.get(field, "")).strip()}
+                if len(codes) > 1:
+                    raise ValueError("同一行辅料的编号字段存在冲突，无法安全查询供应商。")
+                code = next(iter(codes), "")
                 if not code:
                     supplier_values.append(("", ""))
                     continue
