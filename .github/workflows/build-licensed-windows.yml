@@ -42,15 +42,15 @@ jobs:
       - name: Compile, smoke-test and build installer
         shell: powershell
         run: ./packaging/build_licensed_windows.ps1 -PublicKeys ./public-keys.json
-      - name: Build unsigned UI update
+      - name: Add customer installation guide
         shell: pwsh
-        run: ./packaging/.build-venv/Scripts/python.exe update_publisher.py build-unsigned --web-root ./web --version 0.3.1 --sequence 2 --output ./preview/Office-Auto-Flow-0.3.1.oaf-update
-      - name: Upload customer installer and update
+        run: Copy-Item -LiteralPath ./packaging/customer-install-guide.txt -Destination ./preview/安装说明.txt
+      - name: Upload customer full installer
         uses: actions/upload-artifact@v4
         with:
-          name: AIOA-Customer-Release
+          name: AIOA-Customer-Full-20261118
           path: |
             preview/Office-Auto-Flow-API-Licensed-*-win-x64.exe
             preview/Office-Auto-Flow-API-Licensed-*-win-x64.exe.sha256
-            preview/Office-Auto-Flow-0.3.1.oaf-update
+            preview/安装说明.txt
           if-no-files-found: error

@@ -47,7 +47,7 @@ def write_verification_keys(source, license_keys, update_keys, base_sequence=Non
     if set(license_keys) & set(update_keys) or set(license_keys.values()) & set(update_keys.values()):
         raise ValueError("更新发布密钥必须独立创建，不能复用软件许可证密钥。")
     if base_sequence is None:
-        base_sequence = 1
+        base_sequence = int(datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S"))
     if type(base_sequence) is not int or base_sequence < 1:
         raise ValueError("基础版本序号必须是正整数。")
     (source / "license_keys.py").write_text("PUBLIC_KEYS = " + repr(license_keys) + "\n", encoding="utf-8")
