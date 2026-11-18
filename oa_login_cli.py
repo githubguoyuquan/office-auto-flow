@@ -634,7 +634,22 @@ class AutomationController:
 
     def snapshot(self) -> dict:
         with self.lock:
+            worker = self.local_worker if self.state.get("operation") == "PPTX 面辅料提取" else self.worker
+            if self.task_active and worker is not None and not worker.is_alive():
+                self.task_active = False
+                self.state.update(phase="error", message="任务工作进程已结束，可重新选择文件并运行。")
             return dict(self.state, maintenance=self.updating, task_active=self.task_active)
+
+    def reset(self) -> dict:
+        with self.lock:
+            if self.task_active or self.updating or self.shutdown_event.is_set():
+                raise ValueError("请先停止任务并等待结束，再重置任务。")
+            self.cancel_event.clear()
+            self.messages = queue.Queue()
+            self.state = {"phase": "idle", "step": "open", "login_encountered": False,
+                          "message": "任务已重置，请重新选择文件或填写款号。", "operation": "",
+                          "title": "", "url": "", "content": "", "updated_at": ""}
+        return self.snapshot()
 
     @contextmanager
     def maintenance(self):
@@ -1652,6 +1667,8 @@ class LocalHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/credentials":
                 CONTROLLER.submit_credentials(str(body.get("username", "")), str(body.get("password", "")))
                 self._send(200, {"ok": True})
+            elif self.path == "/api/task/reset":
+                self._send(200, {"task": CONTROLLER.reset()})
             elif self.path == "/api/stop":
                 CONTROLLER.stop()
                 self._send(200, {"ok": True})

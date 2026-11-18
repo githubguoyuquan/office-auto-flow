@@ -66,10 +66,10 @@
   $('templateFile').addEventListener('change',async()=>{const file=$('templateFile').files[0];if(!file)return;if(file.size>5*1024*1024){toast('模板不能超过 5 MB');$('templateFile').value='';return}try{const content=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('模板读取失败'));reader.readAsDataURL(file)});const data=await api('/api/template','POST',{filename:file.name,content});await refresh();$('templateHistory').value=data.template.id;toast('模板已保存，下次默认使用');renderTask()}catch(error){toast(error.message)}finally{$('templateFile').value=''}});
   const runningPhases = new Set(['opening','login_required','authenticating','reading','stopping']);
   function taskRunning(){return typeof currentTask.task_active==='boolean'?currentTask.task_active:runningPhases.has(currentTask.phase)}
-  let refreshInFlight=false;
+  let refreshRequest=null,taskStateEpoch=0;
   const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
   function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('show'),3600)}
-  async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
+  async function api(path,method='GET',body){const response=await fetch(path,{method,headers:{'Content-Type':'application/json','X-AIOA-Token':TOKEN},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal:path==='/api/state'?AbortSignal.timeout(15000):undefined});let data;try{data=await response.json()}catch{data={error:'无法读取服务器响应。'}}if(!response.ok)throw new Error(data.error||'请求失败。');return data}
   function selected(){return operations.find(item=>item.name===selectedName)}
   function businessDescription(item){if(!item)return '选择左侧业务，查看任务内容并开始运行。';if(item.description)return item.description;return isPrintOperation(item)?'输入款号，查询并打印完整工艺单，再按模板生成辅料 XLSX。':'打开业务页面并读取主要内容。'}
   function canRun(item){if(!moduleAllowed(item)||licenseChecking||exiting||!item||taskRunning()||choosingDirectory)return false;if(!isPrintOperation(item))return true;const file=$('styleCodesFile').files[0],code=$('styleCode').value.trim(),template=$('templateHistory').value;if(file&&code)return false;const hasCodes=file?file.name.toLowerCase().endsWith('.xlsx'):/^[A-Za-z0-9_-]{1,80}$/.test(code);return hasCodes&&!!$('originalDir').value.trim()&&(!template||!!$('convertedDir').value.trim())}
@@ -100,14 +100,14 @@
     $('chooseConvertedDir').disabled=choosingDirectory||taskRunning()||!$('templateHistory').value;
     const chosen=selected();$('composerCopy').textContent=chosen?chosen.name:'先选择一个业务操作';const hint=document.createElement('small');hint.textContent=businessDescription(chosen);$('composerCopy').append(hint);
     document.querySelector('.page-title').textContent=chosen?chosen.name:'选择业务操作';document.querySelector('.page-desc').textContent=businessDescription(chosen);
-    const phase=currentTask.phase||'idle', active=runningPhases.has(phase), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
+    const phase=currentTask.phase||'idle', active=taskRunning(), badge=$('statusBadge');badge.className='status-badge '+(phase==='done'?'done':phase==='error'?'error':phase==='login_required'?'login_required':active?'running':'');badge.textContent=labels[phase]||phase;$('taskValue').textContent=labels[phase]||'待开始';
     $('statusTitle').textContent=phase==='idle'?'准备就绪':(currentTask.operation||'业务操作')+' · '+(labels[phase]||phase);$('statusMessage').textContent=phase==='idle'?'选择左侧业务操作后，即可开始。':currentTask.message||'';
     if(phase==='idle'&&chosen&&licenseState.valid&&!moduleAllowed(chosen)){$('statusTitle').textContent='业务未授权';$('statusMessage').textContent='当前许可证未包含此业务模块，请联系管理员调整授权。'}
     $('runButton').disabled=!canRun(chosen)||!/^https?:\/\//.test(chosen?.url||'');$('runButton').textContent=phase==='done'||phase==='error'||phase==='cancelled'?'重新运行':'开始运行';$('stopButton').hidden=!active;$('stopButton').disabled=phase==='stopping';$('loginCard').hidden=phase!=='login_required';
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
-  async function refresh(){if(refreshInFlight)return;refreshInFlight=true;try{const data=await api('/api/state');operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(!supplierMappingBusy)supplierMappingState=data.supplier_mapping||{configured:false,count:0};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}finally{refreshInFlight=false}}
+  function refresh(){if(refreshRequest)return refreshRequest;const epoch=taskStateEpoch;refreshRequest=(async()=>{try{const data=await api('/api/state');if(epoch!==taskStateEpoch)return;operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(!supplierMappingBusy)supplierMappingState=data.supplier_mapping||{configured:false,count:0};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}finally{refreshRequest=null}})();return refreshRequest}
   $('searchInput').addEventListener('input',renderOperations);
   const clearBatch=document.createElement('button');clearBatch.type='button';clearBatch.className='ghost';clearBatch.id='clearStyleCodesFile';clearBatch.textContent='清除批量文件';$('styleCodesFile').after(clearBatch);clearBatch.onclick=()=>{$('styleCodesFile').value='';renderTask()};
   $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())$('styleCodesFile').value=''});
@@ -169,4 +169,22 @@
   canRun=item=>!updateBusy&&!currentTask.maintenance&&!currentTask.task_active&&beforeUpdateCanRun(item);
   const beforeUpdateRenderTask=renderTask;
   renderTask=()=>{beforeUpdateRenderTask();renderUpdates();if(updateBusy||currentTask.maintenance){$('runButton').disabled=true;exitButton.disabled=true}};
+  let resettingTask=false;
+  const resetTaskButton=document.createElement('button');resetTaskButton.type='button';resetTaskButton.className='ghost';resetTaskButton.id='resetTask';resetTaskButton.textContent='重置任务';$('stopButton').after(resetTaskButton);
+  resetTaskButton.onclick=async()=>{
+    if(resettingTask||taskRunning()||pptxBusy||choosingDirectory||updateBusy||currentTask.maintenance)return;
+    resettingTask=true;renderTask();
+    try{
+      const result=await api('/api/task/reset','POST',{});taskStateEpoch++;currentTask=result.task;
+      for(const id of ['styleCode','styleCodesFile','templateFile'])$(id).value='';
+      pptx.inputs=[];pptxFilesKey='';pptxBusyMessage='';$('pptxError').hidden=true;
+      toast('任务状态和已选工艺单已重置，可重新选择文件');
+    }catch(error){toast(error.message)}finally{resettingTask=false;renderTask()}
+  };
+  const beforeResetCanRun=canRun;canRun=item=>!resettingTask&&beforeResetCanRun(item);
+  const beforeResetRenderTask=renderTask;renderTask=()=>{
+    beforeResetRenderTask();resetTaskButton.disabled=resettingTask||taskRunning()||pptxBusy||choosingDirectory||updateBusy||!!currentTask.maintenance||exiting;
+    resetTaskButton.textContent=resettingTask?'正在重置…':'重置任务';
+    if(resettingTask)$('runButton').disabled=true;
+  };
   refresh();

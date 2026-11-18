@@ -139,3 +139,63 @@ class WorkbenchUpdateTests(unittest.TestCase):
         self.assertEqual(code, 200, result)
         self.assertEqual(result["version"], "release-1")
         self.assertTrue(self.request("/api/updates/status")[1]["enabled"])
+
+    def test_reset_requires_idle_and_preserves_saved_files(self):
+        source = self.root / "saved-settings.json"
+        source.write_text("keep")
+        self.assertEqual(self.request("/api/task/reset", {}, token=False)[0], 403)
+        self.controller.task_active = True
+        self.assertEqual(self.request("/api/task/reset", {})[0], 400)
+        self.controller.task_active = False
+        self.controller.state.update(phase="done", output_path="old-output.xlsx", batch_total=2)
+        code, result = self.request("/api/task/reset", {})
+        self.assertEqual(code, 200, result)
+        self.assertEqual(result["task"]["phase"], "idle")
+        self.assertNotIn("output_path", result["task"])
+        self.assertNotIn("batch_total", result["task"])
+        self.assertFalse(result["task"]["task_active"])
+        self.assertEqual(source.read_text(), "keep")
+
+    def test_reset_is_rejected_during_update_or_shutdown(self):
+        with self.controller.maintenance():
+            self.assertEqual(self.request("/api/task/reset", {})[0], 400)
+        self.controller.shutdown_event.set()
+        self.assertEqual(self.request("/api/task/reset", {})[0], 400)
+
+    def test_snapshot_recovers_dead_task_worker(self):
+        self.controller.worker = threading.Thread(target=lambda: None)
+        self.controller.task_active = True
+        self.controller.state.update(phase="reading", operation="工艺单打印")
+        state = self.controller.snapshot()
+        self.assertFalse(state["task_active"])
+        self.assertEqual(state["phase"], "error")
+        self.assertEqual(self.request("/api/task/reset", {})[0], 200)
+
+    def test_stop_reset_and_restart_local_task(self):
+        entered = threading.Event()
+
+        def until_cancelled(request, cancel, publish, **options):
+            entered.set()
+            cancel.wait(3)
+            raise app.ExtractionCancelled()
+
+        operation = {"name": "PPTX 面辅料提取", "module_id": "pptx_material_extract",
+                     "kind": "pptx_extract", "request": {}}
+        with patch.object(app, "prepare_pptx_request", return_value={"inputs": ["test.pptx"]}), \
+                patch.object(app, "pptx_executable", return_value=self.root / "kernel"), \
+                patch.object(app, "invoke_pptx", side_effect=until_cancelled):
+            try:
+                for _ in range(2):
+                    entered.clear()
+                    self.controller.start(operation)
+                    self.assertTrue(entered.wait(2))
+                    self.controller.stop()
+                    self.controller.local_worker.join(3)
+                    state = self.controller.snapshot()
+                    self.assertFalse(state["task_active"])
+                    self.assertEqual(state["phase"], "cancelled")
+                    self.assertEqual(self.controller.reset()["phase"], "idle")
+            finally:
+                self.controller.cancel_event.set()
+                if self.controller.local_worker:
+                    self.controller.local_worker.join(3)
