@@ -754,8 +754,9 @@ class AutomationController:
             if not self.task_active:
                 raise ValueError("当前没有运行中的任务。")
             self.cancel_event.set()
+            self.state.update(phase="stopping", message="正在停止任务…",
+                              updated_at=datetime.now().strftime("%H:%M:%S"))
         self.messages.put(("cancel",))
-        self.update("stopping", "正在停止任务…")
 
     def shutdown(self) -> None:
         with self.lock:
