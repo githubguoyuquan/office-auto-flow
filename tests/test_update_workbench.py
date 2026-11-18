@@ -57,7 +57,7 @@ class WorkbenchUpdateTests(unittest.TestCase):
             content = response.read().decode()
             return response.status, json.loads(content) if "application/json" in response.headers["Content-Type"] else content
 
-    def package(self, sequence=1, invalid_js=False):
+    def package(self, sequence=1, invalid_js=False, unsigned=False):
         files = {name: (WEB_ROOT / Path(name).name).read_bytes() for name in WEB_FILES}
         files["web/workbench.js"] += (b"\nfunction {" if invalid_js else
                                        f"\nwindow.__UPDATE_TEST__ = 'release-{sequence}';".encode())
@@ -65,8 +65,9 @@ class WorkbenchUpdateTests(unittest.TestCase):
                     "sequence": sequence, "version": f"release-{sequence}",
                     "files": {name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
                               for name, data in files.items()}}
-        envelope = {"key_id": "test", "manifest": manifest,
-                    "signature": base64.b64encode(self.key.sign(canonical(manifest))).decode()}
+        envelope = ({"manifest": manifest, "unsigned": True} if unsigned else
+                    {"key_id": "test", "manifest": manifest,
+                     "signature": base64.b64encode(self.key.sign(canonical(manifest))).decode()})
         path = self.root / f"update-{sequence}.zip"
         with ZipFile(path, "w", ZIP_DEFLATED) as archive:
             archive.writestr("update.json", canonical(envelope))
@@ -132,9 +133,9 @@ class WorkbenchUpdateTests(unittest.TestCase):
         self.assertEqual(status["version"], "基础版本")
         self.assertEqual(self.request("/api/updates/rollback", {})[0], 200)
 
-    def test_development_build_without_release_key_cannot_install(self):
+    def test_development_build_without_release_key_can_install_unsigned_update(self):
         self.manager.keys = {}
-        code, result = self.request("/api/updates/install", self.package(), raw=True)
-        self.assertEqual(code, 400, result)
-        self.assertIn("公钥", result["error"])
-        self.assertFalse(self.request("/api/updates/status")[1]["enabled"])
+        code, result = self.request("/api/updates/install", self.package(unsigned=True), raw=True)
+        self.assertEqual(code, 200, result)
+        self.assertEqual(result["version"], "release-1")
+        self.assertTrue(self.request("/api/updates/status")[1]["enabled"])
