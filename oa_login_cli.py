@@ -32,6 +32,7 @@ from pptx_service import (ExtractionCancelled, choose_files, executable as pptx_
 from pptx_service import load_settings as load_pptx_settings, save_settings as save_pptx_settings
 from ui_resources import render_page
 from template_builder import collect_labels, create_template
+from pptx_suppliers import extract_with_suppliers as extract_pptx_with_suppliers, fill_suppliers
 from update_manager import UpdateManager
 import pptx_service
 from customer_profile import PROFILE, business_url, compatibility_host
@@ -265,7 +266,8 @@ def business_operations(settings: dict) -> List[dict]:
     return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings),
                  supplier_lookup_enabled=PROFILE["supplier_lookup"]["enabled"]),
             {"name":"PPTX 面辅料提取", "kind":"pptx_extract", "module_id":"pptx_material_extract",
-             "url":"本地文件", "description":"选择 PPTX 和 Excel 模板，将面辅料数据汇总到一个表格。"},
+             "url":"本地文件", "description":"提取面辅料并汇总到 XLSX，模板有供应商列时自动查询并映射供应商名称。",
+             "supplier_lookup_enabled": PROFILE["supplier_lookup"]["enabled"]},
             {"name":"制作模板", "kind":"template_builder", "module_id":"template_builder",
              "url":"本地文件", "description":"从 PPTX 或 XLSX 识别候选字段，编辑列名后下载空白提取模板。"}]
 
@@ -725,6 +727,7 @@ class AutomationController:
             if self.shutdown_event.is_set() or self.task_active or self.updating:
                 raise ValueError("已有任务正在运行或工作台正在退出。")
             binary = pptx_executable()
+            self.messages = queue.Queue()
             self.cancel_event.clear()
             self.task_active = True
             self.state = {"phase": "running", "step": "extract", "login_encountered": False,
@@ -748,17 +751,77 @@ class AutomationController:
                 self.update("running", "正在汇总提取数据…", step="extract", batch_completed=completed,
                             content="\n".join(messages[-MAX_OUTPUT_LINES:]))
         try:
-            result = invoke_pptx(request, self.cancel_event, publish, binary=binary)
+            result = extract_pptx_with_suppliers(request, self.cancel_event, publish, binary,
+                                               self._pptx_supplier_stage,
+                                               enabled=PROFILE["supplier_lookup"]["enabled"])
+            if result.get("supplier_missing"):
+                messages.append(f"{result['supplier_missing']} 行辅料未查询到供应商，对应单元格留空。")
+            if "supplier_queries" in result:
+                messages.append(f"供应商补全：查询 {result['supplier_queries']} 个不同辅料编号。")
             self.update("done", f"提取完成：成功 {result['success']} 个，失败 {result['failed']} 个。",
                         step="export", output_path=result["output"],
                         content="\n".join([f"已保存：{result['output']}"] + messages[-MAX_OUTPUT_LINES:]))
-        except ExtractionCancelled:
+        except (ExtractionCancelled, Cancelled):
             self.update("cancelled", "提取已停止。", step="extract")
         except Exception as error:
             self.update("error", f"提取失败：{error}", step="extract")
         finally:
             with self.lock:
                 self.task_active = False
+
+    def _pptx_supplier_stage(self, path: Path, code_column: int, columns: dict) -> dict:
+        with CONFIG_LOCK:
+            settings = load_settings()
+            mapping = load_supplier_mapping(data_dir())["entries"]
+        if not settings.get("login_url"):
+            raise ValueError("供应商补全需要 OA 登录地址，请先在应用配置中设置。")
+        done, outcome = threading.Event(), {}
+        operation = {"kind": "pptx_suppliers", "url": business_url(settings),
+                     "login_url": settings["login_url"], "supplier_name_mapping": mapping,
+                     "_supplier_done": done, "_supplier_outcome": outcome,
+                     "_supplier_action": lambda lookup: fill_suppliers(path, code_column, columns, lookup, self.cancel_event)}
+        self.update("reading", "正在查询并映射辅料供应商…", step="suppliers")
+        with self.lock:
+            if not self.worker or not self.worker.is_alive():
+                self.worker = threading.Thread(target=self._worker_loop, daemon=True)
+                self.worker.start()
+            self.jobs.put(operation)
+        while not done.wait(0.1):
+            if not self.worker.is_alive():
+                done.set()
+                if self.cancel_event.is_set() or self.shutdown_event.is_set():
+                    raise ExtractionCancelled()
+                raise RuntimeError("供应商查询服务未能启动，请重试。")
+        if "error" in outcome:
+            raise outcome["error"]
+        if "result" not in outcome:
+            if self.cancel_event.is_set() or self.shutdown_event.is_set():
+                raise ExtractionCancelled()
+            raise RuntimeError("供应商查询未完成，请重新运行任务。")
+        return outcome["result"]
+
+    def _finish_pptx_suppliers(self, context: Any, operation: dict) -> dict:
+        page = next((item for item in context.pages if not item.is_closed()), None) or context.new_page()
+        options = self._supplier_export_options(context, page, operation)
+        if "supplier_lookup" not in options:
+            raise ValueError("供应商查询未启用。")
+        lookup = options["supplier_lookup"]
+        login_retried = False
+
+        def query(code):
+            nonlocal login_retried
+            try:
+                return lookup(code)
+            except RuntimeError as error:
+                message = str(error)
+                if login_retried or not any(text in message for text in ("没有返回 JSON", "未登录", "请先登录", "登录失效")):
+                    raise
+                login_retried = True
+                page.goto(operation["login_url"], wait_until="commit", timeout=60_000)
+                self._wait_for_login(page, operation)
+                return lookup(code)
+
+        return operation["_supplier_action"](query)
 
     def submit_credentials(self, username: str, password: str) -> None:
         with self.lock:
@@ -1109,6 +1172,8 @@ class AutomationController:
                         operation = self.jobs.get(timeout=0.5)
                     except queue.Empty:
                         continue
+                    if operation.get("kind") == "pptx_suppliers" and operation["_supplier_done"].is_set():
+                        continue
                     try:
                         if context is not None and not context_closed.is_set():
                             try:
@@ -1122,27 +1187,36 @@ class AutomationController:
                             context.add_init_script(LOGIN_SUBMIT_GUARD)
                             install_noah_login_compatibility(context)
                             install_noah_print_compatibility(context)
-                        if len(operation.get("style_codes", [])) > 1:
+                        if operation.get("kind") == "pptx_suppliers":
+                            operation["_supplier_outcome"]["result"] = self._finish_pptx_suppliers(context, operation)
+                        elif len(operation.get("style_codes", [])) > 1:
                             self._run_batch(operation, context, playwright)
                         else:
                             if operation.get("style_codes"):
                                 operation["style_code"] = operation["style_codes"][0]
                             self._run(operation, context)
                     except Exception as error:
-                        self.update("error", f"执行失败：{error}")
-                        if context is not None:
+                        if operation.get("kind") == "pptx_suppliers":
+                            operation["_supplier_outcome"]["error"] = error
+                        else:
+                            self.update("error", f"执行失败：{error}")
+                        if context is not None and operation.get("kind") != "pptx_suppliers":
                             try:
                                 context.close()
                             except Exception:
                                 pass
                             context = None
                     finally:
-                        with self.lock:
-                            self.task_active = False
+                        if operation.get("kind") == "pptx_suppliers":
+                            operation["_supplier_done"].set()
+                        else:
+                            with self.lock:
+                                self.task_active = False
         except Exception as error:
             self.update("error", f"浏览器服务启动失败：{error}")
             with self.lock:
-                self.task_active = False
+                if not self.local_worker or not self.local_worker.is_alive():
+                    self.task_active = False
         finally:
             if context is not None:
                 try:

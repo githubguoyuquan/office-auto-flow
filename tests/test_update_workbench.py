@@ -174,7 +174,7 @@ class WorkbenchUpdateTests(unittest.TestCase):
     def test_stop_reset_and_restart_local_task(self):
         entered = threading.Event()
 
-        def until_cancelled(request, cancel, publish, **options):
+        def until_cancelled(request, cancel, publish, *args, **options):
             entered.set()
             cancel.wait(3)
             raise app.ExtractionCancelled()
@@ -183,7 +183,7 @@ class WorkbenchUpdateTests(unittest.TestCase):
                      "kind": "pptx_extract", "request": {}}
         with patch.object(app, "prepare_pptx_request", return_value={"inputs": ["test.pptx"]}), \
                 patch.object(app, "pptx_executable", return_value=self.root / "kernel"), \
-                patch.object(app, "invoke_pptx", side_effect=until_cancelled):
+                patch.object(app, "extract_pptx_with_suppliers", side_effect=until_cancelled):
             try:
                 for _ in range(2):
                     entered.clear()

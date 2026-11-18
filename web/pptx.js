@@ -1,5 +1,6 @@
 
   const isPptx=item=>item?.kind==='pptx_extract';
+  const pptxNeedsSuppliers=()=>selected()?.supplier_lookup_enabled!==false&&(pptxAnalysis?.headers||[]).some(header=>String(header).split(/[|｜]/).some(name=>/^(供应商(名称)?[12一二]?|supplier(name)?[12]?)$/i.test(name.normalize('NFKC').replace(/\s/g,''))));
   const pptxStyle=document.createElement('style');pptxStyle.textContent=`
     #pptxPanel{--pptx-accent:#28785e;margin:16px 0 0;color:var(--ink)}
     html[data-theme="dark"] #pptxPanel{--pptx-accent:#94cfb8}
@@ -69,7 +70,7 @@
     <details id="pptxMappingDetails"><summary>字段与提取设置<span id="pptxMappingSummary">选择模板后自动匹配</span></summary><p class="pptx-caption" style="margin-top:12px">默认按原字段名自动提取，无需逐列设置。已配置的别名显示在目标字段左侧；取消勾选会移除该别名。</p><div id="pptxMapping"></div><div class="pptx-advanced-actions"><button id="pptxAnalyze" type="button" class="ghost" hidden>恢复自动匹配</button><button id="pptxRules" type="button" class="ghost">字段别名</button><button id="pptxSave" type="button" class="ghost" hidden>重试保存</button></div></details>
     <p id="pptxSaveStatus" class="pptx-caption" role="status" aria-live="polite"></p>
     <p id="pptxError" role="alert" hidden></p>
-    <p class="pptx-note">◈ 无需登录 OA · 模板与设置自动记忆 · 下次只需重新选择工艺单</p>`;
+    <p class="pptx-note">◈ 模板与设置自动记忆 · 有供应商列时自动查询 OA 并映射名称</p>`;
   $('printFields').after(pptxPanel);
   const rulesModal=document.createElement('div');rulesModal.className='modal-backdrop';
   rulesModal.innerHTML=`<section class="modal" id="pptxRulesDialog" role="dialog" aria-modal="true" aria-labelledby="pptxRulesTitle"><div class="modal-top"><h3 id="pptxRulesTitle">字段别名</h3><button id="pptxCloseRules" type="button" class="ghost">关闭</button></div><p class="panel-sub">把同一字段的不同写法统一起来。例如“用量” → “数量”，多种写法可以指向同一字段。</p><div id="pptxRuleRows" style="display:grid;gap:10px;max-height:320px;overflow:auto;margin-top:20px"></div><div class="modal-actions"><button id="pptxAddRule" type="button" class="ghost">＋ 新增别名</button><button id="pptxApplyRules" type="button" class="primary">应用并保存</button></div><p id="pptxRulesError" role="alert" style="color:var(--bad)"></p></section>`;
@@ -150,11 +151,25 @@
     $('pptxSaveStatus').textContent=pptxBusyMessage||pptxSaveStatus;
     aliasSettingsButton.disabled=active||pptxBusy||!pptxReady;
     for(const el of rulesModal.querySelectorAll('button,input,select'))el.disabled=active||pptxBusy;
-    if(local){const missing=[];if(!pptx.inputs.length)missing.push('选择工艺单');if(!pptx.template||!pptxAnalysis)missing.push('选择有效模板');const own=currentTask.operation==='PPTX 面辅料提取';$('runButton').disabled=!canRun(selected());$('runButton').textContent=pptxBusy?'处理中…':active?(own?'正在提取…':'任务运行中'):own&&currentTask.phase==='done'?'再次提取':'开始提取';$('composerCopy').firstChild.textContent=pptx.inputs.length?`${pptx.inputs.length} 个文件 → 1 份汇总表`:'准备提取工艺单';$('composerCopy').lastElementChild.textContent=!pptxReady?'正在恢复上次配置…':pptxBusyMessage|| (missing.length?'还需：'+missing.join('、'):active?'可点击“停止任务”取消':'已就绪，开始后自动保存当前配置');document.querySelector('.fine-print').textContent='文件保留在本机，提取过程无需 OA 登录。'}else{document.querySelector('.fine-print').textContent='密码不会保存；登录状态保存在本机浏览器配置中，OA 会话失效后需重新登录。'}
+    if(local){const missing=[];if(!pptx.inputs.length)missing.push('选择工艺单');if(!pptx.template||!pptxAnalysis)missing.push('选择有效模板');const own=currentTask.operation==='PPTX 面辅料提取';$('runButton').disabled=!canRun(selected());$('runButton').textContent=pptxBusy?'处理中…':active?(own?'正在提取…':'任务运行中'):own&&currentTask.phase==='done'?'再次提取':'开始提取';$('composerCopy').firstChild.textContent=pptx.inputs.length?`${pptx.inputs.length} 个文件 → 1 份汇总表`:'准备提取工艺单';$('composerCopy').lastElementChild.textContent=!pptxReady?'正在恢复上次配置…':pptxBusyMessage|| (missing.length?'还需：'+missing.join('、'):active?'可点击“停止任务”取消':'已就绪，开始后自动保存当前配置');document.querySelector('.fine-print').textContent=pptxNeedsSuppliers()?'供应商补全复用 OA 登录状态，映射表在应用配置中管理。':'文件保留在本机，当前模板无需供应商查询。'}else{document.querySelector('.fine-print').textContent='密码不会保存；登录状态保存在本机浏览器配置中，OA 会话失效后需重新登录。'}
     exitButton.disabled=choosingDirectory||pptxBusy||exiting;
     pptxCopyResult.hidden=currentTask.operation!=='PPTX 面辅料提取'||currentTask.phase!=='done'||!currentTask.output_path;
     if(currentTask.operation==='PPTX 面辅料提取'&&currentTask.content){$('resultHeading').textContent='提取结果';$('resultTitle').textContent='面辅料汇总 XLSX'}
   };
-  const baseTimeline=renderTimeline;renderTimeline=item=>{if(!isPptx(item)){baseTimeline(item);return}const timeline=$('taskTimeline');timeline.replaceChildren();const phase=currentTask.operation===item.name?currentTask.phase:'idle';for(const [index,label] of ['提取面辅料','汇总并保存 XLSX'].entries()){const step=document.createElement('div');step.className='step'+(phase==='done'?' complete':phase==='running'&&index===0?' active':'');const number=document.createElement('span');number.className='step-num';number.textContent=index+1;const text=document.createElement('span');text.className='step-label';text.textContent=label;step.append(number,text);timeline.append(step)}};
+  const baseTimeline=renderTimeline;renderTimeline=item=>{
+    if(!isPptx(item)){baseTimeline(item);return}
+    const timeline=$('taskTimeline');timeline.replaceChildren();
+    const own=currentTask.operation===item.name,phase=own?currentTask.phase:'idle';
+    const steps=[['extract','提取面辅料']];
+    if(own&&currentTask.login_encountered)steps.push(['login','完成 OA 登录']);
+    if(pptxNeedsSuppliers())steps.push(['suppliers','查询并映射供应商']);
+    steps.push(['export','汇总并保存 XLSX']);
+    const active=Math.max(0,steps.findIndex(([key])=>key===(own?currentTask.step:'extract')));
+    for(const [index,[key,label]] of steps.entries()){
+      const step=document.createElement('div');step.className='step'+(phase==='done'||index<active?' complete':own&&taskRunning()&&index===active?' active':'');
+      const number=document.createElement('span');number.className='step-num';number.textContent=index+1;
+      const text=document.createElement('span');text.className='step-label';text.textContent=label;step.dataset.step=key;step.append(number,text);timeline.append(step);
+    }
+  };
   $('runButton').addEventListener('click',event=>{if(!isPptx(selected()))return;event.stopImmediatePropagation();if(!canRun(selected()))return;pptxAction(async()=>{await pptxSave();await api('/api/pptx/run','POST',pptx);await refresh()})},true);
   (async()=>{try{const saved=await api('/api/pptx/settings');pptx={...pptx,...saved,inputs:[]};if(pptx.template)await pptxAnalyze(true)}catch(error){pptxError(error)}finally{pptxReady=true;renderTask()}})();

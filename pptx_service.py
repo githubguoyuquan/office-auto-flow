@@ -192,6 +192,45 @@ def executable():
     return COMPONENT_RESOLVER(binary)
 
 
+def publish_output(source, destination, cancel):
+    for index in range(10000):
+        if cancel.is_set():
+            raise ExtractionCancelled()
+        name = "面辅料汇总" + (f" ({index})" if index else "") + ".xlsx"
+        output = destination / name
+        try:
+            os.link(source, output)
+            break
+        except FileExistsError:
+            continue
+        except OSError as error:
+            if error.errno not in {errno.EPERM, errno.EACCES, errno.EXDEV, errno.ENOTSUP, errno.EINVAL}:
+                raise
+            # FAT/exFAT and some shares do not support hard links.
+            # Reserve the new name exclusively and remove it on failure.
+            try:
+                target = output.open("xb")
+            except FileExistsError:
+                continue
+            try:
+                with target, source.open("rb") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        if cancel.is_set():
+                            raise ExtractionCancelled()
+                        target.write(chunk)
+                    if cancel.is_set():
+                        raise ExtractionCancelled()
+                    target.flush()
+                    os.fsync(target.fileno())
+            except BaseException:
+                output.unlink(missing_ok=True)
+                raise
+            break
+    else:
+        raise ValueError("同名结果文件过多，请整理保存目录。")
+    return output
+
+
 def invoke(request, cancel, on_event, *, binary=None, timeout=3600):
     if cancel.is_set():
         raise ExtractionCancelled()
@@ -206,41 +245,7 @@ def invoke(request, cancel, on_event, *, binary=None, timeout=3600):
             source = Path(result["output"])
             if source.parent.resolve() != Path(staged).resolve() or not source.is_file():
                 raise ValueError("提取组件返回的输出文件无效。")
-            for index in range(10000):
-                if cancel.is_set():
-                    raise ExtractionCancelled()
-                name = "面辅料汇总" + (f" ({index})" if index else "") + ".xlsx"
-                output = destination / name
-                try:
-                    os.link(source, output)
-                    break
-                except FileExistsError:
-                    continue
-                except OSError as error:
-                    if error.errno not in {errno.EPERM, errno.EACCES, errno.EXDEV, errno.ENOTSUP, errno.EINVAL}:
-                        raise
-                    # FAT/exFAT and some shares do not support hard links.
-                    # Reserve the new name exclusively and remove it on failure.
-                    try:
-                        target = output.open("xb")
-                    except FileExistsError:
-                        continue
-                    try:
-                        with target, source.open("rb") as stream:
-                            while chunk := stream.read(1024 * 1024):
-                                if cancel.is_set():
-                                    raise ExtractionCancelled()
-                                target.write(chunk)
-                            if cancel.is_set():
-                                raise ExtractionCancelled()
-                            target.flush()
-                            os.fsync(target.fileno())
-                    except BaseException:
-                        output.unlink(missing_ok=True)
-                        raise
-                    break
-            else:
-                raise ValueError("同名结果文件过多，请整理保存目录。")
+            output = publish_output(source, destination, cancel)
             result = dict(result, output=str(output))
             on_event(result)
             return result
