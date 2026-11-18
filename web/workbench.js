@@ -108,12 +108,12 @@
     renderTimeline(active?(operations.find(item=>item.name===currentTask.operation)||chosen):chosen);
     const hasResult=(phase==='done'||(['error','cancelled'].includes(phase)&&currentTask.batch_total>1))&&currentTask.content;$('result').hidden=!hasResult;if(hasResult){$('resultHeading').textContent=currentTask.batch_total>1?'批量执行结果':'页面主要内容';$('resultTitle').textContent=currentTask.title||'OA 业务页面';$('resultUrl').textContent=currentTask.url||'';$('resultContent').textContent=currentTask.content;$('resultTime').textContent=currentTask.updated_at||''}
   }
-  function refresh(){if(refreshRequest)return refreshRequest;const epoch=taskStateEpoch;refreshRequest=(async()=>{try{const data=await api('/api/state');if(epoch!==taskStateEpoch)return;operations=data.operations||[];currentTask=data.task||{phase:'idle'};if(!supplierMappingBusy)supplierMappingState=data.supplier_mapping||{configured:false,count:0};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}finally{refreshRequest=null}})();return refreshRequest}
+  function refresh(){if(refreshRequest)return refreshRequest;const epoch=taskStateEpoch;refreshRequest=(async()=>{try{const data=await api('/api/state');if(epoch!==taskStateEpoch)return;operations=data.operations||[];currentTask=data.task||{phase:'idle'};workbenchSettings=data.settings||{};if(!supplierMappingBusy)supplierMappingState=data.supplier_mapping||{configured:false,count:0};if(!licenseChecking){licenseState=data.license||{valid:false};renderLicense();if(licenseState.valid)licenseAutoAttempted=false;else if(licenseState.code==='time_check_required'&&!licenseAutoAttempted){licenseAutoAttempted=true;checkLicense()}}syncPrintSettings(data.print_settings);if(selectedName&&!selected())selectedName='';if(!selectedName&&operations.length)selectedName=operations[0].name;renderOperations();renderDetail();renderTask();}catch(error){$('statusMessage').textContent='本地服务连接失败：'+error.message}finally{refreshRequest=null}})();return refreshRequest}
   $('searchInput').addEventListener('input',renderOperations);
   const clearBatch=document.createElement('button');clearBatch.type='button';clearBatch.className='ghost';clearBatch.id='clearStyleCodesFile';clearBatch.textContent='清除批量文件';$('styleCodesFile').after(clearBatch);clearBatch.onclick=()=>{$('styleCodesFile').value='';renderTask()};
   $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())$('styleCodesFile').value=''});
   $('styleCodesFile').addEventListener('change',()=>{if($('styleCodesFile').files.length)$('styleCode').value=''});
-  for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,renderTask)}
+  for(const id of ['styleCode','styleCodesFile','originalDir','convertedDir','templateHistory']){for(const event of ['input','change'])$(id).addEventListener(event,()=>renderTask())}
   $('runButton').addEventListener('click',async()=>{const item=selected();if(!item)return;const style_code=$('styleCode').value.trim().toUpperCase();if(isPrintOperation(item)&&!canRun(item)){toast('请填写单个款号或选择 XLSX 文件，并完成其余运行配置');return}try{if(isPrintOperation(item))await api('/api/print-settings','POST',{original_dir:$('originalDir').value.trim(),converted_dir:$('convertedDir').value.trim(),template_id:$('templateHistory').value});const body={name:item.name,style_code};const file=$('styleCodesFile').files[0];if(isPrintOperation(item)&&file){body.style_codes_file={filename:file.name,content:await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result.split(',')[1]);reader.onerror=()=>reject(new Error('批量款号文件读取失败'));reader.readAsDataURL(file)})}}await api('/api/run','POST',body);await refresh()}catch(error){toast(error.message)}});
   $('stopButton').addEventListener('click',async()=>{try{await api('/api/stop','POST',{});await refresh()}catch(error){toast(error.message)}});
   $('loginForm').addEventListener('submit',async event=>{event.preventDefault();const username=$('username').value,password=$('password').value;try{await api('/api/credentials','POST',{username,password});$('password').value='';await refresh();toast('登录信息已填入 OA 页面')}catch(error){toast(error.message)}});
@@ -214,4 +214,86 @@
     if(resettingTask)$('runButton').disabled=true;
   };
   __TEMPLATE_BUILDER_UI__
+  let printSourceMode=$('styleCodesFile').files.length?'batch':'single',workbenchSettings={};
+  const preparePanel=document.createElement('section');preparePanel.id='taskPreparation';preparePanel.setAttribute('aria-label','任务准备情况');
+  preparePanel.innerHTML='<div class="prep-heading"><strong id="prepTitle">完成准备后开始任务</strong><span id="prepCount"></span></div><p id="prepHint" role="status" aria-live="polite"></p><div id="prepItems"></div>';
+  printFields.before(preparePanel);
+  const sourceCard=$('styleCode').closest('.print-config');
+  const singleSource=document.createElement('div');singleSource.id='printSingleSource';
+  singleSource.append(document.querySelector('label[for="styleCode"]'),$('styleCode'));
+  const batchSource=document.createElement('div');batchSource.id='printBatchSource';
+  batchSource.append(document.querySelector('label[for="styleCodesFile"]'),$('styleCodesFile'),$('styleCodesFileNetwork'),$('clearStyleCodesFile'));
+  const sourceTabs=document.createElement('div');sourceTabs.className='prep-tabs';sourceTabs.setAttribute('role','group');sourceTabs.setAttribute('aria-label','工艺单来源');
+  for(const [mode,label] of [['single','单个款号'],['batch','批量文件']]){
+    const button=document.createElement('button');button.type='button';button.className='ghost';button.dataset.sourceMode=mode;button.textContent=label;
+    button.onclick=()=>{printSourceMode=mode;if(mode==='single')$('styleCodesFile').value='';else $('styleCode').value='';renderTask()};sourceTabs.append(button);
+  }
+  sourceCard.prepend(sourceTabs);sourceCard.append(singleSource,batchSource);
+  document.querySelector('label[for="styleCode"]').textContent='工艺单款号';
+  document.querySelector('label[for="styleCodesFile"]').textContent='上传 XLSX · 第一列每行一个款号';
+  $('styleCode').addEventListener('input',()=>{if($('styleCode').value.trim())printSourceMode='single';renderTask()});
+  $('styleCodesFile').addEventListener('change',()=>{if($('styleCodesFile').files.length)printSourceMode='batch';renderTask()});
+  for(const [index,target,label,optional] of [[1,'styleCode','选择工艺单',false],[2,'templateHistory','辅料导出模板',true],[3,'originalDir','PDF 保存位置',false],[4,'convertedDir','辅料 XLSX 保存位置',true]]){
+    const card=$(target).closest('.print-config'),heading=document.createElement('div');heading.className='prep-card-title';
+    const name=document.createElement('strong');name.textContent=`${index} · ${label}`;const badge=document.createElement('span');badge.className='prep-badge';badge.textContent=optional?'可选':'必填';heading.append(name,badge);card.prepend(heading);
+  }
+  document.querySelector('label[for="templateHistory"]').textContent='不选模板时仅生成 PDF';
+  document.querySelector('label[for="originalDir"]').textContent='完整工艺单 PDF 保存目录';
+  document.querySelector('label[for="convertedDir"]').textContent='导出辅料 XLSX 时填写';
+  for(const [id,title,required] of [['pptxSourceTitle','1 · 选择工艺单',true],['pptxTemplateTitle','2 · 选择输出模板',true],['pptxOutputTitle','3 · 保存位置',false]]){
+    $(id).textContent=title;const badge=document.createElement('span');badge.className='prep-badge';badge.textContent=required?'必填':'默认即可';$(id).append(badge);
+  }
+  function sourceMenu(button,label='网络路径'){
+    const menu=document.createElement('details');menu.className='prep-source-menu';const summary=document.createElement('summary');summary.textContent=label;button.before(menu);menu.append(summary,button);button.addEventListener('click',()=>menu.open=false);
+  }
+  for(const id of ['pptxChooseInputsNetwork','pptxChooseTemplateNetwork','styleCodesFileNetwork','templateFileNetwork'])sourceMenu($(id));
+  const selectedFile=document.createElement('p');selectedFile.className='prep-file-status';selectedFile.id='printFileStatus';sourceCard.append(selectedFile);
+  let lastPreparation='';
+  function preparationItems(){
+    if(isPptx(selected())){
+      const items=[{label:'工艺单文件',done:pptx.inputs.length>0,target:'pptxChooseInputs'},
+        {label:'输出模板',done:!!pptx.template&&!!pptxAnalysis,target:'pptxChooseTemplate'},
+        {label:'保存位置',done:true,optional:true,target:'pptxChooseOutput',detail:pptx.output_dir?'已指定':'默认使用首个文件目录'}];
+      if(pptxNeedsSuppliers())items.push({label:'OA 连接配置',done:!!workbenchSettings.login_url,target:'applicationSettings',detail:'供应商补全需要'});
+      return items;
+    }
+    if(isPrintOperation(selected())){const items=[
+      {label:'工艺单来源',done:printSourceMode==='single'?/^[A-Za-z0-9_-]{1,80}$/.test($('styleCode').value.trim()):!!$('styleCodesFile').files[0]&&/\.xlsx$/i.test($('styleCodesFile').files[0].name)&&$('styleCodesFile').files[0].size>0&&$('styleCodesFile').files[0].size<=5*1024*1024,target:printSourceMode==='single'?'styleCode':'styleCodesFile'},
+      {label:'辅料模板',done:true,optional:true,target:'templateHistory',detail:$('templateHistory').value?'已选择':'不导出辅料 XLSX'},
+      {label:'PDF 保存位置',done:!!$('originalDir').value.trim(),target:'chooseOriginalDir'},
+      {label:'辅料 XLSX 位置',done:!$('templateHistory').value||!!$('convertedDir').value.trim(),optional:!$('templateHistory').value,target:'chooseConvertedDir',detail:!$('templateHistory').value?'无需设置':''}];
+      if(!workbenchSettings.login_url)items.unshift({label:'OA 连接配置',done:false,target:'applicationSettings'});return items;
+    }
+    return [];
+  }
+  function renderPreparation(){
+    const items=preparationItems();preparePanel.hidden=!items.length;
+    document.body.classList.toggle('task-preparing',!!items.length&&!taskRunning()&&currentTask.phase==='idle');
+    const missing=items.filter(item=>!item.optional&&!item.done),required=items.filter(item=>!item.optional);
+    const busy=taskRunning()||choosingDirectory||pptxBusy||updateBusy||resettingTask;
+    const heading=document.querySelector('.run-head h3');heading.textContent=taskRunning()?'任务进度':'任务准备';
+    document.querySelector('.run-head .panel-sub').textContent=taskRunning()?'执行进度与结果会实时更新':'按顺序完成必填项，可选项目可跳过';
+    $('prepTitle').textContent=missing.length?'还需完成 '+missing.length+' 项准备':'准备已完成';
+    $('prepCount').textContent=`${required.filter(item=>item.done).length} / ${required.length} 必填项`;
+    $('prepHint').textContent=missing.length?'下一步：'+missing[0].label:busy?'正在处理，请稍候。':'可以开始任务，也可继续调整可选设置。';
+    preparePanel.classList.toggle('prep-ready',!missing.length);
+    const key=JSON.stringify(items)+busy;
+    if(key!==lastPreparation){lastPreparation=key;$('prepItems').replaceChildren();for(const item of items){
+      const button=document.createElement('button');button.type='button';button.className='prep-item'+(item.done?' is-done':' is-missing')+(item.optional?' is-optional':'');button.disabled=busy;button.textContent=(item.optional?'○ ':item.done?'✓ ':'→ ')+item.label+(item.detail?' · '+item.detail:'');
+      button.onclick=()=>{const target=$(item.target);if(target.closest('details'))target.closest('details').open=true;target.scrollIntoView({behavior:'smooth',block:'center'});target.focus();if(item.target==='applicationSettings')target.click()};$('prepItems').append(button);
+    }}
+    singleSource.hidden=printSourceMode!=='single';batchSource.hidden=printSourceMode!=='batch';
+    for(const button of sourceTabs.querySelectorAll('button')){button.disabled=busy;button.setAttribute('aria-pressed',button.dataset.sourceMode===printSourceMode?'true':'false')}
+    $('printFileStatus').textContent=printSourceMode==='batch'?($('styleCodesFile').files[0]?.name||'尚未选择批量文件'):($('styleCode').value.trim()?'将查询 1 个款号':'填写款号后开始查询');
+    for(const card of document.querySelectorAll('#printFields .print-config'))card.classList.remove('prep-next');
+    if(missing.length&&isPrintOperation(selected()))$(missing[0].target)?.closest('.print-config')?.classList.add('prep-next');
+    const optionalDir=$('convertedDir').closest('.print-config');optionalDir.classList.toggle('prep-inactive',!$('templateHistory').value);optionalDir.querySelector('.prep-badge').textContent=$('templateHistory').value?'必填':'无需设置';
+    if(!taskRunning()&&!isTemplateBuilder(selected())&&currentTask.phase==='idle'){
+      $('statusTitle').textContent=missing.length?'准备尚未完成':'准备就绪';
+      $('statusMessage').textContent=$('prepHint').textContent;
+    }
+    if(missing.length)$('runButton').disabled=true;
+  }
+  const beforePreparationCanRun=canRun;canRun=item=>beforePreparationCanRun(item)&&!preparationItems().some(field=>!field.optional&&!field.done);
+  const beforePreparationRenderTask=renderTask;renderTask=()=>{beforePreparationRenderTask();renderPreparation()};
   refresh();

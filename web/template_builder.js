@@ -46,7 +46,8 @@
     const active=taskRunning()||!!currentTask.maintenance||updateBusy||exiting||resettingTask;
     for(const control of builderPanel.querySelectorAll('button,input'))control.disabled=builderBusy||active;
     $('builderDownload').disabled=builderBusy||active||!!builderProblem();
-    $('builderCount').textContent=`${builderFields.length} 个字段`;
+    $('builderCount').textContent=`${builderFields.length} 个字段`+(builderFields.length?' · '+(builderProblem()||'已就绪，可下载'):' · 先选择文件或新增字段');
+    $('builderDownload').title=builderProblem()||'下载空白 XLSX 模板';
     $('builderSource').textContent=builderBusy?'正在处理，请稍候…':builderFilename?`来源：${builderFilename}`:'也可以直接新增字段，从空白模板开始制作。';
   }
   function drawBuilder(){

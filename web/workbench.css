@@ -65,7 +65,32 @@
     html[data-theme="dark"] .field{background:#212121;border-color:#505050;color:#eee}html[data-theme="dark"] .field:focus,html[data-theme="dark"] .search:focus{border-color:#999;box-shadow:0 0 0 3px #ffffff12}
     html[data-theme="dark"] .run-actions{background:#303030;border-color:#424242;box-shadow:none}
     #printFields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 20px;margin-top:20px}
-    #printFields .print-config{min-width:0}
+    #printFields .print-config{min-width:0;border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--white)}
+    #taskPreparation{border:1px solid var(--line);background:var(--canvas);border-radius:14px;padding:16px 18px;margin:0 0 18px}
+    .prep-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:13px}.prep-heading span{font-size:11px;color:var(--muted)}
+    #prepHint{font-size:12px;line-height:1.6;color:var(--muted);margin:7px 0 12px}
+    #prepItems{display:flex;gap:8px;flex-wrap:wrap}.prep-item{border:1px solid var(--line);border-radius:8px;padding:7px 9px;font-size:11px;background:var(--white);color:var(--muted);text-align:left}
+    .prep-item.is-missing{color:var(--ink);border-color:var(--muted)}.prep-item.is-done{color:var(--good)}
+    .prep-item.is-optional{color:var(--muted)}
+    .prep-ready #prepTitle{color:var(--good)}
+    .prep-card-title{display:flex;align-items:center;gap:8px;justify-content:space-between;margin-bottom:12px;font-size:12px}
+    .prep-badge{display:inline-block;border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:2px 6px;font-size:10px;font-weight:400;margin-left:7px;white-space:nowrap}
+    #printFields .prep-next{border-color:var(--muted)}#printFields .prep-inactive{background:var(--canvas)}
+    .prep-tabs{display:flex;border:1px solid var(--line);border-radius:9px;padding:3px;margin-bottom:14px;gap:4px}
+    .prep-tabs button{flex:1;padding:7px 8px;border:0!important;border-radius:6px;font-size:11px}
+    .prep-tabs button[aria-pressed="true"]{background:#292929!important;color:#fff!important}
+    .prep-file-status{font-size:11px;color:var(--muted);overflow-wrap:anywhere;margin:10px 0 0}
+    #printBatchSource>label{margin-top:0!important}#printBatchSource>input{margin-bottom:8px}
+    .prep-source-menu{position:relative;flex-shrink:0;font-size:11px;color:var(--muted)}
+    .prep-source-menu>summary{cursor:pointer;list-style:none;white-space:nowrap;padding:9px 5px}.prep-source-menu>summary:after{content:'⌄';margin-left:5px}
+    .prep-source-menu>button{position:absolute;right:0;top:100%;z-index:12;min-width:120px;background:var(--white)!important;border:1px solid var(--line)!important;box-shadow:0 8px 28px #0002;margin-top:4px}
+    #pptxPanel .pptx-head h4{display:flex;align-items:center;flex-wrap:wrap;gap:3px}
+    html[data-theme="dark"] #printFields .print-config{background:var(--canvas)}
+    html[data-theme="dark"] .prep-tabs button[aria-pressed="true"]{background:#eee!important;color:#222!important}
+    html[data-theme="dark"] .prep-item{background:#292929}
+    html[data-theme="dark"] .prep-source-menu>button{background:#292929!important}
+    body.task-preparing .timeline,body.task-preparing .status-card{display:none}
+    @media(max-width:560px){.prep-heading{align-items:flex-start}.prep-card-title{font-size:12px}#taskPreparation{padding:14px}.prep-item{flex:1 1 120px}#pptxPanel .pptx-drop{flex-wrap:wrap}}
     #printFields .field-label{display:block;margin:0 0 8px}
     #printFields .field{width:100%;min-width:0}
     #printFields .picker-row{display:flex;gap:8px;align-items:center}
