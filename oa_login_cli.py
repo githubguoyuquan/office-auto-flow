@@ -31,6 +31,7 @@ from pptx_service import (ExtractionCancelled, choose_files, executable as pptx_
                           validate_file as validate_pptx_file)
 from pptx_service import load_settings as load_pptx_settings, save_settings as save_pptx_settings
 from ui_resources import render_page
+from template_builder import collect_labels, create_template
 from update_manager import UpdateManager
 import pptx_service
 from customer_profile import PROFILE, business_url, compatibility_host
@@ -264,7 +265,9 @@ def business_operations(settings: dict) -> List[dict]:
     return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings),
                  supplier_lookup_enabled=PROFILE["supplier_lookup"]["enabled"]),
             {"name":"PPTX 面辅料提取", "kind":"pptx_extract", "module_id":"pptx_material_extract",
-             "url":"本地文件", "description":"选择 PPTX 和 Excel 模板，将面辅料数据汇总到一个表格。"}]
+             "url":"本地文件", "description":"选择 PPTX 和 Excel 模板，将面辅料数据汇总到一个表格。"},
+            {"name":"制作模板", "kind":"template_builder", "module_id":"template_builder",
+             "url":"本地文件", "description":"从 PPTX 或 XLSX 识别候选字段，编辑列名后下载空白提取模板。"}]
 
 
 def visible_locator(
@@ -676,6 +679,8 @@ class AutomationController:
             )
 
     def start(self, operation: dict) -> None:
+        if operation.get("kind") == "template_builder":
+            raise ValueError("请在制作模板页面选择文件并下载模板。")
         module_id = operation.get("module_id")
         if not isinstance(module_id, str) or not module_id.strip():
             raise ValueError("该业务尚未配置授权模块，请联系管理员。")
@@ -1492,7 +1497,7 @@ class LocalHandler(BaseHTTPRequestHandler):
             limit = MAX_MAPPING_BYTES * 2
         elif self.path == "/api/run":
             limit = MAX_BATCH_FILE_BYTES * 2 + MAX_BODY_BYTES
-        elif self.path in {"/api/pptx/run", "/api/pptx/template", "/api/pptx/settings"}:
+        elif self.path in {"/api/pptx/run", "/api/pptx/template", "/api/pptx/settings", "/api/template-builder/download"}:
             limit = 4 * 1024 * 1024
         else:
             limit = MAX_BODY_BYTES
@@ -1539,7 +1544,26 @@ class LocalHandler(BaseHTTPRequestHandler):
                 self._install_update()
                 return
             body = self._body()
-            if self.path == "/api/updates/rollback":
+            if self.path == "/api/template-builder/source":
+                LICENSES.require_valid(feature="template_builder")
+                kind = body.get("kind")
+                if not isinstance(kind, str) or kind not in {"pptx", "xlsx"}:
+                    raise ValueError("请选择 PPTX 或 XLSX 文件。")
+                if CONTROLLER.task_active:
+                    raise ValueError("请等待当前任务结束后再选择文件。")
+                if not DIRECTORY_PICKER_LOCK.acquire(blocking=False):
+                    raise ValueError("文件选择窗口已打开。")
+                try:
+                    paths = choose_files(kind, multiple=False)
+                finally:
+                    DIRECTORY_PICKER_LOCK.release()
+                self._send(200, {"fields": collect_labels(paths[0]), "filename": Path(paths[0]).name}
+                           if paths else {"cancelled": True})
+            elif self.path == "/api/template-builder/download":
+                LICENSES.require_valid(feature="template_builder")
+                content = create_template(body.get("fields"))
+                self._send(200, {"filename": "面辅料提取模板.xlsx", "content": base64.b64encode(content).decode("ascii")})
+            elif self.path == "/api/updates/rollback":
                 with CONTROLLER.maintenance():
                     status = UPDATES.rollback()
                 self._send(200, status)

@@ -187,4 +187,5 @@
     resetTaskButton.textContent=resettingTask?'正在重置…':'重置任务';
     if(resettingTask)$('runButton').disabled=true;
   };
+  __TEMPLATE_BUILDER_UI__
   refresh();

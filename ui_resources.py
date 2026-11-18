@@ -2,7 +2,7 @@
 from pathlib import Path
 
 WEB_ROOT = Path(__file__).resolve().parent / "web"
-RESOURCE_NAMES = ("index.html", "workbench.css", "bootstrap.js", "workbench.js", "pptx.js")
+RESOURCE_NAMES = ("index.html", "workbench.css", "bootstrap.js", "workbench.js", "pptx.js", "template_builder.js")
 
 
 def render_page(token: str, root: Path | None = None) -> str:
@@ -12,6 +12,7 @@ def render_page(token: str, root: Path | None = None) -> str:
     except (OSError, UnicodeError) as error:
         raise ValueError("工作台界面文件缺失或损坏，请重新安装或恢复更新前版本。") from error
     script = resources["workbench.js"].replace("__PPTX_UI__", resources["pptx.js"])
+    script = script.replace("__TEMPLATE_BUILDER_UI__", resources["template_builder.js"])
     return (resources["index.html"]
             .replace("__WORKBENCH_CSS__", resources["workbench.css"])
             .replace("__BOOTSTRAP_JS__", resources["bootstrap.js"])
