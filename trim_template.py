@@ -89,7 +89,10 @@ def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
     temporary = destination.with_suffix(".tmp.xlsx")
     try:
         sheet = workbook.worksheets[0]
-        generated_headers = ("供应商", "供应商1", "供应商2") if supplier_lookup is not None else ()
+        # Legacy print templates may retain supplier columns after lookup is
+        # disabled. Reserve them instead of requiring a source-field match.
+        generated_headers = ("供应商", "供应商1", "供应商2", "供应商名称",
+                             "供应商名称1", "供应商名称2", "Supplier", "Supplier1", "Supplier2")
         header_row, mapping = _match_columns(sheet, records, generated_headers)
         data_row = header_row + 1
         supplier_values = []

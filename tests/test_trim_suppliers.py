@@ -27,6 +27,19 @@ class SupplierExportTests(unittest.TestCase):
         book.save(self.template)
         book.close()
 
+    def test_legacy_supplier_columns_are_blank_without_lookup(self):
+        self.make_template(("辅料编号", "名称", "供应商", "供应商1", "供应商2"))
+        result = export_trim_xlsx(self.template,
+            [[['辅料编号', '001'], ['名称', '纽扣'], ['Supplier1', '160027']]], self.destination)
+        book = load_workbook(self.destination)
+        try:
+            self.assertEqual([book.active.cell(3,c).value for c in range(1,6)],
+                             ['001','纽扣',None,None,None])
+            self.assertEqual(book.active.cell(2,3).value,'供应商')
+            self.assertEqual(result['supplier_missing'],0)
+        finally:
+            book.close()
+
     def test_suppliers_follow_the_same_row_and_duplicate_codes_are_cached(self):
         self.make_template()
         lookup = Mock(side_effect=lambda code: {
