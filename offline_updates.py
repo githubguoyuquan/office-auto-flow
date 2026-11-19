@@ -16,7 +16,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 PRODUCT = "office-auto-flow"
-BASE_API = 2
+BASE_API = 3
 WEB_FILES = {"web/" + name for name in (
     "index.html", "workbench.css", "bootstrap.js", "workbench.js", "pptx.js", "template_builder.js")}
 ALLOWED_FILES = WEB_FILES | {"pptx_extractor/bin/pptx-extractor.exe"}

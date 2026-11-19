@@ -33,6 +33,7 @@ from pptx_service import load_settings as load_pptx_settings, save_settings as s
 from pptx_service import validate_selected_paths
 from ui_resources import render_page
 from template_builder import collect_labels, create_template
+from table_sources import preview_tables
 from pptx_suppliers import extract_with_suppliers as extract_pptx_with_suppliers, fill_suppliers
 from update_manager import UpdateManager
 import pptx_service
@@ -181,11 +182,18 @@ def choose_directory(initial: str) -> str:
                 $owner = New-Object System.Windows.Forms.Form
                 $owner.TopMost = $true
                 $owner.ShowInTaskbar = $false
+                $owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+                $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+                $owner.Size = New-Object System.Drawing.Size(1, 1)
+                $owner.Opacity = 0
                 try {
+                    $owner.Show()
+                    $owner.BringToFront()
+                    [void]$owner.Activate()
                     if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
                         [Console]::Write($dialog.SelectedPath)
                     }
-                } finally { $dialog.Dispose(); $owner.Dispose() }'''
+                } finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }'''
             command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
             environment = dict(os.environ, AIOA_PICKER_INITIAL=str(start))
         else:
@@ -271,7 +279,7 @@ def read_style_codes(filename: str, encoded: str) -> List[str]:
 
 def business_operations(settings: dict) -> List[dict]:
     return [dict(FIXED_BUSINESS_OPERATION, url=business_url(settings),
-                 supplier_lookup_enabled=PROFILE["supplier_lookup"]["enabled"]),
+                 supplier_lookup_enabled=False),
             {"name":"PPTX 面辅料提取", "kind":"pptx_extract", "module_id":"pptx_material_extract",
              "url":"本地文件", "description":"提取面辅料并汇总到 XLSX，模板有供应商列时自动查询并映射供应商名称。",
              "supplier_lookup_enabled": PROFILE["supplier_lookup"]["enabled"]},
@@ -1156,15 +1164,12 @@ class AutomationController:
                 version += 1
             try:
                 conversion = export_trim_xlsx(template_path, trim_tables, converted_xlsx,
-                    shared_fields={fields["template_style"]: official_style},
-                    **self._supplier_export_options(context, page, operation))
+                    shared_fields={fields["template_style"]: official_style})
             except Cancelled:
                 raise
             except Exception as error:
                 raise RuntimeError(f"完整工艺单已保存：{saved_pdf}；辅料模板转换失败：{error}") from error
             printed.append(f"{style_code} / 次数 {row['seq']}：完整PDF {saved_pdf}；辅料XLSX {converted_xlsx}（{conversion['rows']} 条）")
-            if conversion["supplier_missing"]:
-                printed.append(f"提示：{conversion['supplier_missing']} 行辅料没有供应商信息，对应供应商单元格留空。")
         return {"title": f"{style_code} · 工艺单打印", "url": operation["url"], "content": "\n".join(printed)}
 
     def _worker_loop(self) -> None:
@@ -1288,17 +1293,12 @@ class AutomationController:
                         destination = directory / f"{stem}_{version}.xlsx"
                         version += 1
                     template = data_dir() / "templates" / f"{operation['print_settings']['template_id']}.xlsx"
-                    supplier_options = self._supplier_export_options(primary_context, page, operation) if phase == "done" else {}
-                    conversion = export_trim_xlsx(template, [table], destination, **supplier_options)
+                    conversion = export_trim_xlsx(template, [table], destination)
                     lines.append(f"辅料汇总 XLSX：{destination}（{conversion['rows']} 条）")
-                    if conversion["supplier_missing"]:
-                        lines.append(f"提示：{conversion['supplier_missing']} 行辅料没有供应商信息，对应供应商单元格留空。")
-                    if phase != "done" and PROFILE["supplier_lookup"]["enabled"]:
-                        lines.append("本批任务未完整完成，已保留基础辅料汇总，供应商信息尚未补充。")
                     message += " 已生成辅料汇总文件。"
                 except Cancelled:
                     phase = "cancelled"
-                    message = "任务已停止，供应商查询未完成；已保存的工艺单 PDF 保留。"
+                    message = "任务已停止；已保存的工艺单 PDF 保留。"
                 except Exception as error:
                     phase = "error" if phase != "cancelled" else phase
                     message += f" 辅料汇总失败：{error}"
@@ -1625,7 +1625,7 @@ class LocalHandler(BaseHTTPRequestHandler):
                 self._install_update()
                 return
             body = self._body()
-            if self.path == "/api/template-builder/source":
+            if self.path in {"/api/template-builder/source", "/api/table-recognition/preview"}:
                 LICENSES.require_valid(feature="template_builder")
                 kind = body.get("kind")
                 if not isinstance(kind, str) or kind not in {"pptx", "xlsx"}:
@@ -1639,7 +1639,8 @@ class LocalHandler(BaseHTTPRequestHandler):
                              if "paths" in body else choose_files(kind, multiple=False))
                 finally:
                     DIRECTORY_PICKER_LOCK.release()
-                self._send(200, {"fields": collect_labels(paths[0]), "filename": Path(paths[0]).name}
+                self._send(200, (preview_tables(paths[0]) if self.path == "/api/table-recognition/preview"
+                                else {"fields": collect_labels(paths[0]), "filename": Path(paths[0]).name})
                            if paths else {"cancelled": True})
             elif self.path == "/api/local-xlsx":
                 paths = validate_selected_paths(body.get("paths"), "xlsx", multiple=False)

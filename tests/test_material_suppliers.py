@@ -105,19 +105,19 @@ class SupplierWorkflowTests(unittest.TestCase):
     def http_result(url, payload):
         return SimpleNamespace(status=200, ok=True, url=url, json=lambda: payload)
 
-    def assert_export(self, suppliers=("160002", "000003")):
+    def assert_export(self, suppliers=()):
         files = list(self.output.glob("*.xlsx"))
         self.assertEqual(len(files), 1)
         book = load_workbook(files[0])
         try:
-            self.assertEqual([book.active.cell(1, col).value for col in range(1, 5)],
-                             ["辅料编号", "名称", "供应商", "供应商2"])
-            self.assertEqual([book.active.cell(2, col).value for col in range(1, 5)],
-                             ["TTX3240", "辅料", *suppliers])
+            self.assertEqual([book.active.cell(1, col).value for col in range(1, 3)],
+                             ["辅料编号", "名称"])
+            self.assertEqual([book.active.cell(2, col).value for col in range(1, 3)],
+                             ["TTX3240", "辅料"])
         finally:
             book.close()
 
-    def test_single_print_calls_supplier_api_and_exports_the_same_row(self):
+    def test_single_print_does_not_query_suppliers(self):
         self.operation["supplier_name_mapping"] = {"160002": "供应商甲", "000003": "供应商乙"}
         def post(url, **kwargs):
             if url.endswith("queryProcessSheet"):
@@ -133,9 +133,10 @@ class SupplierWorkflowTests(unittest.TestCase):
         tables = [[['辅料编号', 'TTX3240'], ['名称', '辅料']]]
         with patch.object(app, "save_process_sheet_pdf", return_value=(self.root / "print.pdf", "", tables)):
             self.controller._print_process_sheets(self.context, self.page, self.operation)
-        self.assert_export(("供应商甲", "供应商乙"))
+        self.assert_export()
+        self.assertTrue(all("queryMaterialListWithPage" not in call.args[0] for call in self.context.request.post.call_args_list))
 
-    def test_batch_aggregate_uses_the_primary_context_for_suppliers(self):
+    def test_batch_aggregate_does_not_query_suppliers(self):
         self.operation["supplier_name_mapping"] = {"160002": "供应商甲"}
         def run(job, context, publish):
             job["_batch_trim"].append(("STYLE1", 0, [{"辅料编号": "TTX3240", "名称": "辅料"}]))
@@ -145,8 +146,8 @@ class SupplierWorkflowTests(unittest.TestCase):
             {"materialCode": "TTX3240", "supplier1": "160002", "supplier2": "000003"}]))
         with patch.object(app, "open_business_page"):
             self.controller._run_batch(self.operation, self.context, None)
-        self.assert_export(("供应商甲", "000003"))
-        self.context.request.post.assert_called_once()
+        self.assert_export()
+        self.context.request.post.assert_not_called()
         self.assertEqual(self.controller.snapshot()["phase"], "done")
 
     def test_cancelled_partial_batch_keeps_basic_export_without_new_requests(self):
@@ -158,7 +159,7 @@ class SupplierWorkflowTests(unittest.TestCase):
             self.controller._run_batch(self.operation, self.context, None)
         self.context.request.post.assert_not_called()
         self.assertEqual(len(list(self.output.glob("*.xlsx"))), 1)
-        self.assertIn("供应商信息尚未补充", self.controller.snapshot()["content"])
+        self.assertNotIn("供应商", self.controller.snapshot()["content"])
 
     def test_expired_parallel_request_stops_without_opening_login(self):
         self.context.request.post.return_value = SimpleNamespace(status=401, url=self.operation["url"])

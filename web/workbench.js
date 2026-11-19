@@ -90,7 +90,7 @@
   const labels = {idle:'待开始',opening:'打开页面',login_required:'等待登录',authenticating:'验证中',reading:'读取中',stopping:'停止中',done:'已完成',error:'执行失败',cancelled:'已停止'};
   function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.classList.remove('show'),3600)}
   async function api(path,method='GET',body){
-    const duration=['/api/pptx/files','/api/choose-directory','/api/template-builder/source'].includes(path)?310000:['/api/state','/api/pptx/settings','/api/pptx/template','/api/settings','/api/local-xlsx','/api/template','/api/supplier-mapping'].includes(path)?30000:0;
+    const duration=['/api/pptx/files','/api/choose-directory','/api/template-builder/source','/api/table-recognition/preview'].includes(path)?310000:['/api/state','/api/pptx/settings','/api/pptx/template','/api/settings','/api/local-xlsx','/api/template','/api/supplier-mapping'].includes(path)?30000:0;
     const controller=new AbortController();
     const timer=duration?setTimeout(()=>controller.abort(),duration):null;
     try{

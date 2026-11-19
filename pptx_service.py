@@ -126,7 +126,17 @@ $d.RestoreDirectory = $true
 $owner = New-Object System.Windows.Forms.Form
 $owner.TopMost = $true
 $owner.ShowInTaskbar = $false
-try { if ($d.ShowDialog($owner) -eq 'OK') { ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { '[]' } } finally { $d.Dispose(); $owner.Dispose() }'''
+$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+$owner.Size = New-Object System.Drawing.Size(1, 1)
+$owner.Opacity = 0
+try {
+    # TopMost only takes effect after a visible native window has been created.
+    $owner.Show()
+    $owner.BringToFront()
+    [void]$owner.Activate()
+    if ($d.ShowDialog($owner) -eq 'OK') { ConvertTo-Json -Compress -InputObject @($d.FileNames) } else { '[]' }
+} finally { $d.Dispose(); $owner.Close(); $owner.Dispose() }'''
         command = ["powershell.exe", "-NoProfile", "-STA", "-Command", script]
         label = "PowerPoint 文件" if kind == "pptx" else "Excel 工作簿"
         env = dict(os.environ, AIOA_FILE_KIND=kind,
@@ -263,8 +273,20 @@ def invoke(request, cancel, on_event, *, binary=None, timeout=3600):
     if request.get("action") == "extract":
         destination = Path(request.get("output_dir") or Path(request["inputs"][0]).parent)
         with tempfile.TemporaryDirectory(prefix=".pptx-", dir=destination) as staged:
-            result = _invoke(dict(request, output_dir=staged), cancel,
-                             lambda event: on_event(event) if event.get("type") != "done" else None,
+            from table_extraction import normalize_pptx
+            inputs, original = [], {}
+            for index, filename in enumerate(request['inputs']):
+                if cancel.is_set():raise ExtractionCancelled()
+                folder=Path(staged)/'sources'/str(index);folder.mkdir(parents=True)
+                copy=folder/Path(filename).name
+                if normalize_pptx(filename,copy,cancel):
+                    inputs.append(str(copy));original[str(copy)]=filename
+                else:inputs.append(filename)
+            def relay(event):
+                if event.get('input') in original:event=dict(event,input=original[event['input']])
+                if event.get('type')!='done':on_event(event)
+            result = _invoke(dict(request, inputs=inputs, output_dir=staged), cancel,
+                             relay,
                              binary=binary, timeout=timeout)
             if cancel.is_set():
                 raise ExtractionCancelled()

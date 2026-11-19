@@ -48,7 +48,7 @@ jobs:
       - name: Upload customer full installer
         uses: actions/upload-artifact@v4
         with:
-          name: AIOA-Customer-Full-20261118
+          name: AIOA-Customer-Full-20261119
           path: |
             preview/Office-Auto-Flow-API-Licensed-*-win-x64.exe
             preview/Office-Auto-Flow-API-Licensed-*-win-x64.exe.sha256

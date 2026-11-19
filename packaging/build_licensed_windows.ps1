@@ -25,6 +25,11 @@ if (-not (Test-Path -LiteralPath $buildPython)) {
 if ($LASTEXITCODE -ne 0) { throw "Build dependency installation failed." }
 Push-Location $projectRoot
 try {
+    Push-Location (Join-Path $projectRoot "pptx_extractor")
+    try {
+        & go build -trimpath -o bin/pptx-extractor.exe .
+        if ($LASTEXITCODE -ne 0) { throw "Test extraction component build failed." }
+    } finally { Pop-Location }
     & $buildPython -m unittest discover -s tests -v
     if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
     $buildStamp = Get-Date -Format "yyyyMMdd_HHmmss"

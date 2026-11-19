@@ -33,6 +33,33 @@
     <p id="builderEmpty">尚无字段，请选择文件或新增字段。</p><div id="builderTableWrap" hidden><table id="builderTable" aria-label="空白提取模板预览"><thead><tr id="builderHeaders"></tr></thead><tbody><tr id="builderEmptyRow"></tr></tbody></table></div>
     <p id="builderError" role="alert" hidden></p><div class="builder-actions" style="justify-content:flex-end"><button id="builderDownload" type="button" class="primary" disabled>下载 XLSX 模板</button></div></div>`;
   $('pptxPanel').after(builderPanel);
+  const recognitionPanel=document.createElement('div');recognitionPanel.className='builder-card';
+  recognitionPanel.innerHTML='<h3>复杂表格识别预览</h3><p>核对横纵方向、多级表头和原始位置。每表最多预览 200 行、80 列；每个候选显示前 5 条记录。正式 PPTX 提取会自动整理结构明确的表格；歧义表格需先拆分确认。</p><div class="builder-actions"><button type="button" class="ghost" id="previewTablesXlsx">预览 XLSX</button><button type="button" class="ghost" id="previewTablesPptx">预览 PPTX</button></div><div id="recognitionResults" aria-live="polite"></div>';
+  builderPanel.prepend(recognitionPanel);
+  function drawRecognition(result){
+    const root=$('recognitionResults');root.replaceChildren();
+    const description=document.createElement('p');description.textContent=result.filename+' · '+result.notice;root.append(description);
+    for(const warning of result.warnings){const p=document.createElement('p');p.textContent=warning;root.append(p)}
+    for(const block of result.tables){
+      const section=document.createElement('section'),heading=document.createElement('h4');
+      heading.textContent=block.location+' · '+({ready:'结构候选明确',review:'需要确认',unrecognized:'未识别结构'}[block.status]);section.append(heading);
+      for(const warning of block.warnings){const p=document.createElement('p');p.textContent=warning;section.append(p)}
+      for(const candidate of block.candidates){
+        const details=document.createElement('details'),summary=document.createElement('summary');
+        summary.textContent=(candidate.orientation==='rows'?'按行读取':'按列读取')+' · 表头 '+(candidate.header_start+1)+'–'+(candidate.header_end+1)+' · 样本 '+candidate.record_count_in_sample+' 条';details.append(summary);
+        if(candidate.issues.length){const p=document.createElement('p');p.textContent=candidate.issues.join('；');details.append(p)}
+        const wrap=document.createElement('div');wrap.style.overflow='auto';const table=document.createElement('table');table.style.cssText='border-collapse:collapse;font-size:12px';
+        const head=document.createElement('tr');for(const field of candidate.fields.filter(Boolean)){const th=document.createElement('th');th.textContent=field;th.style.padding='8px';head.append(th)}table.append(head);
+        candidate.records.forEach((record,index)=>{const row=document.createElement('tr');record.forEach((value,column)=>{const cell=document.createElement('td');cell.textContent=value;cell.style.cssText='padding:8px;border:1px solid var(--line);white-space:pre-wrap';const source=candidate.sources[index][column];cell.title='源位置：第 '+(source[0]+1)+' 行，第 '+(source[1]+1)+' 列';row.append(cell)});table.append(row)});
+        wrap.append(table);details.append(wrap);section.append(details);
+      }
+      if(block.candidate_count>block.candidates.length){const p=document.createElement('p');p.textContent='候选较多，仅展示前 10 种，请先拆分表区。';section.append(p)}
+      root.append(section);
+    }
+  }
+  for(const kind of ['xlsx','pptx'])$('previewTables'+(kind==='xlsx'?'Xlsx':'Pptx')).onclick=()=>builderAction(async()=>{
+    const result=await api('/api/table-recognition/preview','POST',{kind});if(!result.cancelled)drawRecognition(result);
+  });
 
   function builderProblem(){
     if(!builderFields.length)return '请先添加字段。';
