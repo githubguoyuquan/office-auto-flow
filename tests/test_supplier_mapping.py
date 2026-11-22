@@ -77,11 +77,11 @@ class SupplierMappingTests(unittest.TestCase):
             controller.worker = Mock()
             controller.worker.is_alive.return_value = True
             with patch.object(app, 'data_dir', return_value=Path(directory)), patch.object(app.LICENSES, 'require_valid'):
-            controller.start({'name': '工艺单打印', 'module_id': 'process_sheet', 'print_settings': {'template_id': 'T'}})
-            job = controller.jobs.get_nowait()
-            save_supplier_mapping(directory, 'mapping.xlsx', encoded_book([['160002', '供应商乙']]))
-            self.assertNotIn('supplier_name_mapping', job)
-            self.assertFalse(any('supplier' in key.lower() for key in job))
+                controller.start({'name': '工艺单打印', 'module_id': 'process_sheet', 'print_settings': {'template_id': 'T'}})
+                job = controller.jobs.get_nowait()
+                save_supplier_mapping(directory, 'mapping.xlsx', encoded_book([['160002', '供应商乙']]))
+                self.assertNotIn('supplier_name_mapping', job)
+                self.assertFalse(any('supplier' in key.lower() for key in job))
 
 
 if __name__ == '__main__':
