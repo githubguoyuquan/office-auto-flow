@@ -70,21 +70,18 @@ class SupplierMappingTests(unittest.TestCase):
             path.unlink()
             self.assertEqual(load_supplier_mapping(directory)['entries'], {})
 
-    def test_task_captures_mapping_once_and_uses_names(self):
+    def test_process_sheet_print_does_not_capture_supplier_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
             save_supplier_mapping(directory, 'mapping.xlsx', encoded_book([['160002', '供应商甲']]))
             controller = app.AutomationController()
             controller.worker = Mock()
             controller.worker.is_alive.return_value = True
             with patch.object(app, 'data_dir', return_value=Path(directory)), patch.object(app.LICENSES, 'require_valid'):
-                controller.start({'name': '工艺单打印', 'module_id': 'process_sheet', 'print_settings': {'template_id': 'T'}})
+            controller.start({'name': '工艺单打印', 'module_id': 'process_sheet', 'print_settings': {'template_id': 'T'}})
             job = controller.jobs.get_nowait()
             save_supplier_mapping(directory, 'mapping.xlsx', encoded_book([['160002', '供应商乙']]))
-            self.assertEqual(job['supplier_name_mapping'], {'160002': '供应商甲'})
-            controller._post_oa_json = Mock(return_value={'code': 10000, 'data': {'pageCount': 1,
-                'list': [{'materialCode': 'TTX3240', 'supplier1': '160002', 'supplier2': ''}]}})
-            callback = controller._supplier_export_options(None, None, job)['supplier_lookup']
-            self.assertEqual(callback('TTX3240'), ('供应商甲', ''))
+            self.assertNotIn('supplier_name_mapping', job)
+            self.assertFalse(any('supplier' in key.lower() for key in job))
 
 
 if __name__ == '__main__':
