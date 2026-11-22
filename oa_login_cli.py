@@ -710,11 +710,6 @@ class AutomationController:
                 raise ValueError("工作台正在退出，无法启动新任务。")
             if self.task_active or self.updating:
                 raise ValueError("已有任务正在运行，请先等待或停止。")
-            with CONFIG_LOCK:
-                name_mapping = (load_supplier_mapping(data_dir())["entries"]
-                                if operation.get("print_settings", {}).get("template_id")
-                                and PROFILE["supplier_lookup"]["enabled"] else {})
-            operation = dict(operation, supplier_name_mapping=name_mapping)
             self.messages = queue.Queue()
             self.cancel_event.clear()
             self.task_active = True

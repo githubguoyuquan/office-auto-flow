@@ -36,6 +36,7 @@ class SupplierExportTests(unittest.TestCase):
             self.assertEqual([book.active.cell(3,c).value for c in range(1,6)],
                              ['001','纽扣',None,None,None])
             self.assertEqual(book.active.cell(2,3).value,'供应商')
+            self.assertTrue(all(book.active.column_dimensions[col].hidden for col in 'CDE'))
             self.assertEqual(result['supplier_missing'],0)
         finally:
             book.close()

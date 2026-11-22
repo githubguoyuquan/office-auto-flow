@@ -94,6 +94,13 @@ def export_trim_xlsx(template_path: Path, tables: list, destination: Path,
         generated_headers = ("供应商", "供应商1", "供应商2", "供应商名称",
                              "供应商名称1", "供应商名称2", "Supplier", "Supplier1", "Supplier2")
         header_row, mapping = _match_columns(sheet, records, generated_headers)
+        if supplier_lookup is None:
+            from openpyxl.utils import get_column_letter
+
+            supplier_keys = {_key(header) for header in generated_headers}
+            for cell in sheet[header_row]:
+                if _key(cell.value) in supplier_keys:
+                    sheet.column_dimensions[get_column_letter(cell.column)].hidden = True
         data_row = header_row + 1
         supplier_values = []
         supplier_missing = 0
