@@ -44,12 +44,19 @@ class FormalTableTests(unittest.TestCase):
         self.assertTrue(any(event.get('input')==str(source) for event in events))
         self.assertFalse(list(self.root.glob('.pptx-*')))
 
-    def test_repeated_header_stops_before_writing(self):
-        source=self.fixture([['辅料编号','颜色'],['001','黑'],['辅料编号','颜色'],['002','白']])
-        output=self.root/'副本.pptx'
-        with self.assertRaisesRegex(ValueError,'多个结构解释|重复表区'):
-            normalize_pptx(source,output,threading.Event())
-        self.assertFalse(output.exists())
+    def test_repeated_sections_merge_without_losing_distinct_rows(self):
+        header = ['辅料编号', '颜色', '数量']
+        rows = [header, ['001', '黑', '2'], header, ['001', '黑', '2'], ['001', '黑', '3'], ['002', '白', '1']]
+        expected = [rows[index] for index in (1, 4, 5)]
+        for layout in (rows, list(map(list, zip(*rows)))):
+            with self.subTest(transposed=layout is not rows):
+                source = self.fixture(layout)
+                output = self.root / '副本.pptx'
+                self.assertTrue(normalize_pptx(source, output, threading.Event()))
+                with ZipFile(output) as archive:
+                    slide = ET.fromstring(archive.read('ppt/slides/slide1.xml'))
+                values = [[cell.text for cell in row.iter(NS + 't')] for row in slide.iter(NS + 'tr')]
+                self.assertEqual(values[1:], expected)
 
     def test_cancelled_normalization_does_not_write(self):
         source=self.fixture([['辅料编号','001'],['颜色','黑']]);cancel=threading.Event();cancel.set()

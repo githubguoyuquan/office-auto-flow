@@ -3,9 +3,46 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile, ZIP_DEFLATED, is_zipfile
 import re
+import shutil
 
 from table_recognition import recognize, field_key
 from table_sources import ALIASES, NS
+
+MAX_SLIDE_BYTES = 32 * 1024 * 1024
+MAX_EXTRACTION_BYTES = 128 * 1024 * 1024
+
+
+def merge_repeated_sections(rows, candidates):
+    """Remove identical header blocks and duplicate records from a plain grid."""
+    width = max(map(len, rows))
+    grid = [tuple(value.strip() for value in row) + ('',) * (width - len(row)) for row in rows]
+    layouts = set()
+    for candidate in candidates:
+        transposed = candidate.orientation == 'columns'
+        lines = list(zip(*grid)) if transposed else grid
+        start, end = candidate.header_start, candidate.header_end + 1
+        header = lines[start:end]
+        if not header or not any(any(line) for line in header):
+            continue
+        merged = lines[:end]
+        seen = set()
+        repeated = False
+        index = end
+        while index < len(lines):
+            if lines[index:index + len(header)] == header:
+                repeated = True
+                index += len(header)
+                continue
+            line = lines[index]
+            if any(line) and line not in seen:
+                merged.append(line)
+                seen.add(line)
+            index += 1
+        if repeated:
+            layouts.add(tuple(zip(*merged)) if transposed else tuple(merged))
+    if len(layouts) == 1:
+        return [list(row) for row in layouts.pop()]
+    return None
 
 
 def normalize_pptx(source, destination, cancel):
@@ -15,15 +52,19 @@ def normalize_pptx(source, destination, cancel):
     aliases['颜色']=[*aliases['颜色'],'面料颜色','辅料颜色']
     changed=0
     with ZipFile(source) as archive:
-        entries=archive.infolist()
-        if len(entries)>10000 or sum(item.file_size for item in entries)>32*1024*1024:
-            raise ValueError('文件过大，请拆分后提取。')
+        # The extraction component only reads slide text and its index.
+        # Do not decompress media into the temporary extraction input.
+        entries = [entry for entry in archive.infolist() if not entry.filename.startswith('ppt/media/')]
+        if len(entries) > 10000 or sum(entry.file_size for entry in entries) > MAX_EXTRACTION_BYTES:
+            raise ValueError(f'{Path(source).name}：PPTX 除图片等媒体素材外的内容过大，请拆分后提取。')
         replacements={}
         for entry in entries:
             if cancel.is_set():
                 from pptx_service import ExtractionCancelled
                 raise ExtractionCancelled()
             if not re.fullmatch(r'ppt/slides/slide\d+\.xml',entry.filename):continue
+            if entry.file_size > MAX_SLIDE_BYTES:
+                raise ValueError(f'{Path(source).name} · {Path(entry.filename).stem}：单页内容超过 32 MB，请精简该页后重试。')
             raw=archive.read(entry)
             if b'<!DOCTYPE' in raw or b'<!ENTITY' in raw:raise ValueError('不支持的 XML 声明。')
             root=ET.fromstring(raw);dirty=False
@@ -47,6 +88,16 @@ def normalize_pptx(source, destination, cancel):
                 if not candidates:continue  # Preserve legacy inline/label layouts.
                 count=max(len(set(f for f in c.fields if f)) for c in candidates)
                 candidates=[c for c in candidates if len(set(f for f in c.fields if f))==count]
+                if not merges and (len(candidates) != 1 or candidates[0].issues):
+                    merged = merge_repeated_sections(rows, candidates)
+                    if merged is not None:
+                        resolved = [
+                            item for item in recognize(merged, aliases)['candidates']
+                            if any(field in {'面料编号', '辅料编号'} for field in item.fields)
+                            and len(set(item.fields) - {None}) == count
+                        ]
+                        if len(resolved) == 1 and not resolved[0].issues:
+                            rows, candidates = merged, resolved
                 if len(candidates)!=1 or candidates[0].issues:
                     raise ValueError(f'{Path(source).name} · {Path(entry.filename).stem} 表 {number}：表格有多个结构解释或重复表区，请先在制作模板中预览并拆分表区。')
                 candidate=candidates[0]
@@ -84,5 +135,13 @@ def normalize_pptx(source, destination, cancel):
             if dirty:replacements[entry.filename]=ET.tostring(root,encoding='utf-8',xml_declaration=True)
         if not changed:return False
         with ZipFile(destination,'w',ZIP_DEFLATED) as output:
-            for entry in entries:output.writestr(entry,replacements.get(entry.filename,archive.read(entry)))
+            for entry in entries:
+                if cancel.is_set():
+                    from pptx_service import ExtractionCancelled
+                    raise ExtractionCancelled()
+                if entry.filename in replacements:
+                    output.writestr(entry.filename, replacements[entry.filename])
+                else:
+                    with archive.open(entry) as member, output.open(entry.filename, 'w') as target:
+                        shutil.copyfileobj(member, target)
     return True
