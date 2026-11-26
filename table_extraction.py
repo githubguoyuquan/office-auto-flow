@@ -12,6 +12,57 @@ MAX_SLIDE_BYTES = 32 * 1024 * 1024
 MAX_EXTRACTION_BYTES = 128 * 1024 * 1024
 
 
+def mixed_orientation_sections(rows, aliases):
+    width = max(map(len, rows), default=0)
+    grid = [row + [''] * (width - len(row)) for row in rows]
+    layouts = []
+    for transposed in (False, True):
+        lines = list(zip(*grid)) if transposed else grid
+        blocks, current = [], []
+        for line in lines:
+            if any(value.strip() for value in line):
+                current.append(line)
+            elif current:
+                blocks.append(current)
+                current = []
+        if current:
+            blocks.append(current)
+        if len(blocks) < 2:
+            continue
+        sections = [list(map(list, zip(*block))) if transposed else block for block in blocks]
+        orientations = set()
+        for section in sections:
+            candidate = material_candidates(section, aliases, [])
+            if len(candidate) != 1 or candidate[0].issues:
+                break
+            orientations.add(candidate[0].orientation)
+        else:
+            if len(orientations) == 2:
+                layouts.append(sections)
+    return layouts[0] if len(layouts) == 1 else []
+
+
+def material_candidates(rows, aliases, merges):
+    candidates = [
+        candidate for candidate in recognize(rows, aliases, merges)['candidates']
+        if {'面料编号', '辅料编号'}.intersection(candidate.fields)
+    ]
+    counts = [len(set(candidate.fields) - {None}) for candidate in candidates]
+    best = max(counts, default=0)
+    return [candidate for candidate, count in zip(candidates, counts) if count == best]
+
+
+def write_rows(table, rows):
+    for values in rows:
+        row = ET.SubElement(table, NS + 'tr', {'h': '1'})
+        for value in values:
+            cell = ET.SubElement(row, NS + 'tc')
+            body = ET.SubElement(cell, NS + 'txBody')
+            paragraph = ET.SubElement(body, NS + 'p')
+            run = ET.SubElement(paragraph, NS + 'r')
+            ET.SubElement(run, NS + 't').text = value
+
+
 def merge_repeated_sections(rows, candidates):
     """Remove identical header blocks and duplicate records from a plain grid."""
     width = max(map(len, rows))
@@ -68,7 +119,9 @@ def normalize_pptx(source, destination, cancel):
             raw=archive.read(entry)
             if b'<!DOCTYPE' in raw or b'<!ENTITY' in raw:raise ValueError('不支持的 XML 声明。')
             root=ET.fromstring(raw);dirty=False
-            for number,table in enumerate(root.iter(NS+'tbl'),1):
+            parents = {child: parent for parent in root.iter() for child in parent if child.tag == NS + 'tbl'}
+            tables = [(table, True) for table in root.iter(NS + 'tbl')]
+            for number,(table,split_allowed) in enumerate(tables,1):
                 rows=[];merges=[]
                 for r,row in enumerate(table.findall(NS+'tr')):
                     values=[]
@@ -83,11 +136,22 @@ def normalize_pptx(source, destination, cancel):
                 # Generic Code/编号 cannot safely identify fabric versus trim.
                 material_keys={field_key(name) for name in ['面料编号','面料名称','面料','辅料编号','辅料编码','辅料','Fabric Code','Trim Code']}
                 if not any(field_key(v) in material_keys for row in rows for v in row):continue
-                result=recognize(rows,aliases,merges)
-                candidates=[c for c in result['candidates'] if any(f in {'面料编号','辅料编号'} for f in c.fields)]
+                if split_allowed and not merges:
+                    sections = mixed_orientation_sections(rows, aliases)
+                    if sections and table in parents:
+                        parent = parents[table]
+                        position = list(parent).index(table)
+                        parent.remove(table)
+                        for offset, section in enumerate(sections):
+                            part = ET.Element(NS + 'tbl')
+                            write_rows(part, section)
+                            parent.insert(position + offset, part)
+                            tables.append((part, False))
+                        dirty = True
+                        continue
+                candidates = material_candidates(rows, aliases, merges)
                 if not candidates:continue  # Preserve legacy inline/label layouts.
-                count=max(len(set(f for f in c.fields if f)) for c in candidates)
-                candidates=[c for c in candidates if len(set(f for f in c.fields if f))==count]
+                count = len(set(candidates[0].fields) - {None})
                 if not merges and (len(candidates) != 1 or candidates[0].issues):
                     merged = merge_repeated_sections(rows, candidates)
                     if merged is not None:
@@ -126,11 +190,7 @@ def normalize_pptx(source, destination, cancel):
                     if any(v.strip() for v in row):normalized.append(row)
                 if len(normalized)<2:continue
                 for row in table.findall(NS+'tr'):table.remove(row)
-                for values in normalized:
-                    row=ET.SubElement(table,NS+'tr',{'h':'1'})
-                    for value in values:
-                        cell=ET.SubElement(row,NS+'tc');body=ET.SubElement(cell,NS+'txBody')
-                        para=ET.SubElement(body,NS+'p');run=ET.SubElement(para,NS+'r');ET.SubElement(run,NS+'t').text=value
+                write_rows(table, normalized)
                 dirty=True;changed+=1
             if dirty:replacements[entry.filename]=ET.tostring(root,encoding='utf-8',xml_declaration=True)
         if not changed:return False
